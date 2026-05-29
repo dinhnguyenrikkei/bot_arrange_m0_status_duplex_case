@@ -1,0 +1,84 @@
+========================================================================
+             HƯỚNG DẪN SỬ DỤNG - BOT PHÂN PHỐI LEAD M0 TỰ ĐỘNG
+========================================================================
+
+Bot phân phối lead tự động hỗ trợ tự động tìm kiếm các lead ở trạng thái M0
+trên Lark Bitable (CRM) và gán đều cho các tư vấn viên (TVV) đang đi làm
+hôm nay dựa trên khu vực hoạt động và khoảng cách thời gian hẹn gọi lại.
+
+------------------------------------------------------------------------
+1. HƯỚNG DẪN CÀI ĐẶT & CHẠY BOT
+------------------------------------------------------------------------
+B1. Khởi chạy file:
+    - Chạy trực tiếp file `main.exe`. Một cửa sổ dòng lệnh (Terminal) sẽ mở ra
+      và khởi động web server ở cổng 8000.
+      *Lưu ý: Không tắt cửa sổ Terminal này khi bot đang chạy.*
+
+B2. Truy cập Giao diện Điều khiển (Web Dashboard):
+    - Mở trình duyệt web bất kỳ (Chrome, Edge, Firefox...) và truy cập địa chỉ:
+      http://localhost:8000
+
+B3. Điền thông tin cấu hình cơ bản:
+    - App ID: Mã Lark App ID của bạn (ví dụ: cli_...).
+    - App Secret: Mã Lark App Secret đi kèm.
+    - Link bảng có data Tiktok: Link đầy đủ đến bảng chứa lead cần chia trên Lark.
+    - Link bảng làm việc của tư vấn viên: Link đầy đủ đến bảng chấm công/đi làm của TVV.
+    - Các cuộc gọi cách nhau (phút): Thời gian giãn cách tối thiểu giữa 2 lead được chia
+      cho cùng một TVV để tránh bị chồng chéo giờ hẹn gọi lại (mặc định: 30 phút).
+    - Tần suất quét dữ liệu (giây): Chu kỳ bot tự động quét và chia data (mặc định: 60 giây).
+
+B4. Cấu hình tên cột nâng cao (Click vào mục để mở rộng):
+    - Nhấp chọn "Cấu hình tên cột nâng cao (Advanced Column Mapping)".
+    - Đảm bảo tên các cột nhập vào trùng khớp 100% với tên các cột trên Lark Base của bạn.
+    - **Lưu ý cực kỳ quan trọng**:
+      + Cột "Tư vấn viên (CRM)" và "Người nhận data (CRM)" phải được điền đúng tên cột.
+        Khi gán thành công, bot sẽ điền tài khoản TVV được nhận vào CẢ HAI cột này.
+      + Cột "Nhân sự / Tư vấn viên (TVV)" trong bảng TVV phải trỏ đúng tên cột kiểu
+        Thành viên (Personnel) đã liên kết tài khoản của TVV.
+      + Cột "Thời gian phân phối" (mặc định: Ngày điều chuyển) trên bảng Tiktok phải có
+        định dạng kiểu Ngày/Giờ (Date) trên Lark để bot ghi dấu thời gian phân phối lead.
+
+B5. Lưu cấu hình:
+    - Nhấn nút "Save Configuration". Hệ thống sẽ lưu thông tin cấu hình vào file `.env`
+      và tải lại cài đặt ngay lập tức.
+    - Nhấn "Check Connection" để kiểm tra kết nối với Lark Base. Nếu báo "Lark: Connected"
+      màu xanh lá cây là hệ thống đã liên kết thành công.
+
+------------------------------------------------------------------------
+2. CÁCH HOẠT ĐỘNG & ĐIỀU KHIỂN BOT
+------------------------------------------------------------------------
+- Start Bot (Chạy tự động):
+  + Nhấn nút "Start Bot" trên bảng điều khiển. Trạng thái sẽ chuyển sang màu xanh lá
+    "ACTIVE (Running)". Bot sẽ chạy ngầm và quét chia data tự động mỗi 60 giây.
+  
+- Stop Bot (Tạm dừng tự động):
+  + Nhấn nút "Stop Bot". Trạng thái sẽ chuyển sang màu xám "INACTIVE (Stopped)".
+    Bot sẽ dừng quét tự động.
+
+- Sync M0 Now (Quét và gán ngay lập tức):
+  + Nhấn nút "Sync M0 Now" để ra lệnh cho bot thực hiện quét bảng Tiktok và phân phối
+    các lead M0 chưa được gán ngay lập tức (chạy một lần duy nhất). Nút này hoạt động
+    kể cả khi Bot đang tắt (INACTIVE), hữu ích khi bạn muốn chia dữ liệu thủ công
+    hoặc chạy test nhanh.
+
+- Theo dõi log hệ thống:
+  + Khu vực "Operations & Real-Time Logs" sẽ hiển thị lịch sử hoạt động chi tiết của bot
+    (tìm thấy bao nhiêu lead M0, đã gán lead nào cho TVV nào thành công, hoặc gặp lỗi gì).
+
+------------------------------------------------------------------------
+3. CƠ CHẾ LỰA CHỌN TVV ĐỂ GÁN LEAD
+------------------------------------------------------------------------
+Khi có một lead M0 mới cần chia, bot sẽ tìm kiếm TVV tốt nhất theo thứ tự ưu tiên:
+1. Kiểm tra TVV đi làm hôm nay: Xem trong bảng TVV cột ngày hiện tại (ví dụ: ngày 27/05)
+   TVV nào được tick chọn checkbox đi làm.
+2. Lọc theo khu vực: Ưu tiên TVV có cùng khu vực hoạt động (Team TV) với khu vực của Lead.
+3. Kiểm tra độ bận (Tránh trùng lịch gọi): TVV được chọn phải không có cuộc hẹn gọi lại
+   nào khác trong khoảng giãn cách quy định (ví dụ: cách nhau 30 phút) so với thời gian hẹn
+   gọi lại của lead mới. Nếu TVV bị trùng lịch gọi, bot sẽ ưu tiên tìm kiếm và phân phối lead
+   cho TVV khác đang rảnh trong vùng (hoặc khác vùng). Nếu tất cả TVV đều bị bận/trùng lịch,
+   bot sẽ phân phối xoay vòng lại dựa trên số lượng việc (round-robin) và giữ nguyên giờ gốc
+   khách hẹn (KHÔNG tự động lùi giờ hay sửa giờ để tránh làm mất chuông báo thức/reminder).
+4. Chia đều (Workload round-robin): Nếu có nhiều TVV thỏa mãn, bot sẽ chọn người có ít lead
+   được gán nhất trong ngày, rồi đến người lâu chưa được gán lead nhất.
+5. Chuyển vùng (Overflow): Nếu toàn bộ TVV cùng vùng đều bận hoặc không đi làm, bot sẽ chuyển
+   lead sang chia cho các TVV thuộc vùng khác đang rảnh.

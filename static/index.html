@@ -307,7 +307,72 @@
                     <label for="COOLDOWN_MINUTES_BETWEEN_CALLS">Các cuộc gọi cách nhau (phút)</label>
                     <input type="number" id="COOLDOWN_MINUTES_BETWEEN_CALLS" required min="5" max="1440" value="30">
                 </div>
-                <button type="submit" class="btn-primary" style="margin-top: 0.5rem; width: 100%;">Save Configuration</button>
+                <div class="form-group">
+                    <label for="SYNC_INTERVAL_SECONDS">Tần suất quét dữ liệu (giây)</label>
+                    <input type="number" id="SYNC_INTERVAL_SECONDS" required min="5" max="86400" value="60">
+                </div>
+                
+                <details style="margin-top: 1rem; border: 1px solid var(--card-border); border-radius: 8px; padding: 0.75rem 1rem; background: rgba(255, 255, 255, 0.01);">
+                    <summary style="cursor: pointer; font-size: 0.9rem; font-weight: 600; color: #a5b4fc; display: flex; align-items: center; justify-content: space-between; user-select: none;">
+                        <span>Cấu hình tên cột nâng cao (Advanced Column Mapping)</span>
+                        <span style="font-size: 0.75rem; color: var(--text-secondary);">Nhấp để mở/đóng</span>
+                    </summary>
+                    <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 1rem;">
+                        <div style="border-bottom: 1px solid var(--card-border); padding-bottom: 0.25rem; margin-bottom: 0.25rem;">
+                            <h3 style="font-size: 0.9rem; font-weight: 600; color: #a5b4fc;">BẢNG DATA TIKTOK (CRM)</h3>
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TIKTOK_STATUS">Cột Trạng thái</label>
+                            <input type="text" id="FIELD_TIKTOK_STATUS" placeholder="Mặc định: Trạng thái">
+                        </div>
+                        <div class="form-group">
+                            <label for="VALUE_TIKTOK_STATUS_M0">Giá trị Trạng thái M0</label>
+                            <input type="text" id="VALUE_TIKTOK_STATUS_M0" placeholder="Mặc định: M0-Data đã claim">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TIKTOK_REGION">Cột Khu vực (Data)</label>
+                            <input type="text" id="FIELD_TIKTOK_REGION" placeholder="Mặc định: Khu vực">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TIKTOK_CALLBACK_TIME">Cột Hẹn gọi lại</label>
+                            <input type="text" id="FIELD_TIKTOK_CALLBACK_TIME" placeholder="Mặc định: Hẹn gọi lại">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TIKTOK_ASSIGNED_USER">Cột Tư vấn viên (CRM)</label>
+                            <input type="text" id="FIELD_TIKTOK_ASSIGNED_USER" placeholder="Mặc định: Tư vấn viên">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TIKTOK_RECIPIENT_USER">Cột Người nhận data (CRM)</label>
+                            <input type="text" id="FIELD_TIKTOK_RECIPIENT_USER" placeholder="Mặc định: Người nhận data">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TIKTOK_ASSIGNED_TIME">Cột Thời gian phân phối</label>
+                            <input type="text" id="FIELD_TIKTOK_ASSIGNED_TIME" placeholder="Mặc định: Thời gian phân phối">
+                        </div>
+                        
+                        <div style="border-bottom: 1px solid var(--card-border); padding-bottom: 0.25rem; margin-top: 0.5rem; margin-bottom: 0.25rem;">
+                            <h3 style="font-size: 0.9rem; font-weight: 600; color: #a5b4fc;">BẢNG TƯ VẤN VIÊN (TVV)</h3>
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TVV_USER">Cột Nhân sự / Tư vấn viên (TVV)</label>
+                            <input type="text" id="FIELD_TVV_USER" placeholder="Mặc định: Nhân sự">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TVV_ACTIVE">Cột Đi làm hôm nay (Để trống để tự động nhận diện theo ngày)</label>
+                            <input type="text" id="FIELD_TVV_ACTIVE" placeholder="Mặc định: Đi làm hôm nay / Tự động">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TVV_REGION">Cột Khu vực hoạt động (TVV)</label>
+                            <input type="text" id="FIELD_TVV_REGION" placeholder="Mặc định: Khu vực hoạt động">
+                        </div>
+                        <div class="form-group">
+                            <label for="FIELD_TVV_ROLE">Cột Vai trò (TVV)</label>
+                            <input type="text" id="FIELD_TVV_ROLE" placeholder="Mặc định: Vai trò">
+                        </div>
+                    </div>
+                </details>
+
+                <button type="submit" class="btn-primary" style="margin-top: 1rem; width: 100%;">Save Configuration</button>
             </form>
         </div>
 
@@ -315,6 +380,17 @@
         <div class="card" style="justify-content: flex-start;">
             <h2>Operations & Real-Time Logs</h2>
             
+            <div class="bot-control-panel" style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--card-border); padding: 1rem; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <div>
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500; letter-spacing: 0.05em;">TRẠNG THÁI BOT</div>
+                    <div id="botStatusDisplay" style="font-size: 1.1rem; font-weight: 700; margin-top: 0.25rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="status-dot" id="botStatusDot" style="width: 10px; height: 10px; display: inline-block;"></span>
+                        <span id="botStatusText">Checking...</span>
+                    </div>
+                </div>
+                <button id="toggleBotBtn" class="btn-primary" onclick="toggleBot()" style="padding: 0.5rem 1.25rem; font-size: 0.9rem;">Start Bot</button>
+            </div>
+
             <div style="display: flex; gap: 1rem;">
                 <button class="btn-secondary" onclick="checkHealth()" style="flex: 1;">Check Connection</button>
                 <button class="btn-primary" onclick="triggerSync()" style="flex: 1;">Sync M0 Now</button>
@@ -363,6 +439,33 @@
             terminal.scrollTop = terminal.scrollHeight;
         }
 
+        let isBotActive = false;
+
+        function updateBotUI(active) {
+            isBotActive = active;
+            const botStatusDot = document.getElementById('botStatusDot');
+            const botStatusText = document.getElementById('botStatusText');
+            const toggleBotBtn = document.getElementById('toggleBotBtn');
+
+            if (isBotActive) {
+                botStatusDot.className = 'status-dot healthy';
+                botStatusText.innerText = 'ACTIVE (Running)';
+                botStatusText.style.color = 'var(--accent-success)';
+                toggleBotBtn.innerText = 'Stop Bot';
+                toggleBotBtn.style.background = 'rgba(239, 68, 68, 0.1)';
+                toggleBotBtn.style.color = 'var(--accent-danger)';
+                toggleBotBtn.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            } else {
+                botStatusDot.className = 'status-dot';
+                botStatusText.innerText = 'INACTIVE (Stopped)';
+                botStatusText.style.color = 'var(--text-secondary)';
+                toggleBotBtn.innerText = 'Start Bot';
+                toggleBotBtn.style.background = 'var(--accent-primary)';
+                toggleBotBtn.style.color = 'white';
+                toggleBotBtn.style.border = 'none';
+            }
+        }
+
         async function fetchConfig() {
             try {
                 const res = await fetch('/api/config');
@@ -372,6 +475,7 @@
                         const input = document.getElementById(key);
                         if (input) input.value = data[key];
                     }
+                    updateBotUI(data['BOT_ACTIVE'] === 'True');
                     appendLog('Loaded existing configuration.');
                 }
             } catch (err) {
@@ -384,11 +488,16 @@
             const config = {};
             const keys = [
                 'LARK_APP_ID', 'LARK_APP_SECRET', 'LINK_TABLE_TIKTOK', 'LINK_TABLE_TVV',
-                'COOLDOWN_MINUTES_BETWEEN_CALLS'
+                'COOLDOWN_MINUTES_BETWEEN_CALLS', 'SYNC_INTERVAL_SECONDS',
+                'FIELD_TIKTOK_STATUS', 'VALUE_TIKTOK_STATUS_M0', 'FIELD_TIKTOK_REGION',
+                'FIELD_TIKTOK_CALLBACK_TIME', 'FIELD_TIKTOK_ASSIGNED_USER', 'FIELD_TIKTOK_RECIPIENT_USER',
+                'FIELD_TIKTOK_ASSIGNED_TIME', 'FIELD_TVV_USER', 'FIELD_TVV_ACTIVE', 'FIELD_TVV_REGION', 'FIELD_TVV_ROLE'
             ];
             keys.forEach(k => {
-                config[k] = document.getElementById(k).value;
+                const el = document.getElementById(k);
+                config[k] = el ? el.value : '';
             });
+            config['BOT_ACTIVE'] = isBotActive ? 'True' : 'False';
 
             try {
                 const res = await fetch('/api/config', {
@@ -408,6 +517,45 @@
             } catch (err) {
                 showToast('Network error while saving config.', true);
                 appendLog(`Network error during config update: ${err}`, 'error');
+            }
+        }
+
+        async function toggleBot() {
+            const nextState = !isBotActive;
+            appendLog(`${nextState ? 'Starting' : 'Stopping'} lead assignment bot...`, 'info');
+            
+            const config = {};
+            const keys = [
+                'LARK_APP_ID', 'LARK_APP_SECRET', 'LINK_TABLE_TIKTOK', 'LINK_TABLE_TVV',
+                'COOLDOWN_MINUTES_BETWEEN_CALLS', 'SYNC_INTERVAL_SECONDS',
+                'FIELD_TIKTOK_STATUS', 'VALUE_TIKTOK_STATUS_M0', 'FIELD_TIKTOK_REGION',
+                'FIELD_TIKTOK_CALLBACK_TIME', 'FIELD_TIKTOK_ASSIGNED_USER', 'FIELD_TIKTOK_RECIPIENT_USER',
+                'FIELD_TIKTOK_ASSIGNED_TIME', 'FIELD_TVV_USER', 'FIELD_TVV_ACTIVE', 'FIELD_TVV_REGION', 'FIELD_TVV_ROLE'
+            ];
+            keys.forEach(k => {
+                const el = document.getElementById(k);
+                config[k] = el ? el.value : '';
+            });
+            config['BOT_ACTIVE'] = nextState ? 'True' : 'False';
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                if (res.ok) {
+                    updateBotUI(nextState);
+                    showToast(`Bot ${nextState ? 'started' : 'stopped'} successfully!`);
+                    appendLog(`Bot is now ${nextState ? 'ACTIVE' : 'INACTIVE'}.`);
+                } else {
+                    const errData = await res.json();
+                    showToast(errData.detail || 'Failed to update bot state.', true);
+                    appendLog(`Failed to update bot state: ${errData.detail}`, 'error');
+                }
+            } catch (err) {
+                showToast('Network error while toggling bot status.', true);
+                appendLog(`Network error during bot toggle: ${err}`, 'error');
             }
         }
 

@@ -68,12 +68,12 @@ class LarkClient:
             "Content-Type": "application/json; charset=utf-8"
         }
 
-    def list_records(self, table_id: str, filter_json: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def list_records(self, table_id: str, filter_formula: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List all records from a table, automatically handling pagination.
         
         :param table_id: Bitable table ID
-        :param filter_json: Optional filter JSON body for the API
+        :param filter_formula: Optional filter formula query string
         :return: List of record dictionaries (containing record_id and fields)
         """
         base_token = self._get_base_token(table_id)
@@ -88,6 +88,8 @@ class LarkClient:
             }
             if page_token:
                 params["page_token"] = page_token
+            if filter_formula:
+                params["filter"] = filter_formula
 
             headers = self.get_headers()
             
@@ -193,3 +195,123 @@ class LarkClient:
                 
         logger.info(f"Successfully batch updated {len(records)} records.")
         return {"code": 0, "msg": "success"}
+
+    def batch_create_records(self, table_id: str, records: List[Dict[str, Any]]) -> List[str]:
+        """
+        Batch create records. Max 500 records at a time.
+        
+        :param records: List of dicts, each with key 'fields'.
+                        Example: [{'fields': {'Status': 'M0-Data đã claim', ...}}]
+        :return: List of created record_ids
+        """
+        if not records:
+            return []
+            
+        base_token = self._get_base_token(table_id)
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_create"
+        headers = self.get_headers()
+        created_ids = []
+        
+        # Split into chunks of 500 records
+        chunk_size = 500
+        for i in range(0, len(records), chunk_size):
+            chunk = records[i:i + chunk_size]
+            payload = {"records": chunk}
+            
+            try:
+                logger.info(f"Batch creating {len(chunk)} records in table {table_id}...")
+                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("code") == 0:
+                    items = data.get("data", {}).get("records", [])
+                    for item in items:
+                        rec_id = item.get("record_id")
+                        if rec_id:
+                            created_ids.append(rec_id)
+                else:
+                    raise ValueError(f"Failed to batch create records: {data.get('msg')} (code: {data.get('code')})")
+            except Exception as e:
+                logger.error(f"Error batch creating records: {e}")
+                raise
+                
+        logger.info(f"Successfully batch created {len(created_ids)} records.")
+        return created_ids
+
+    def batch_delete_records(self, table_id: str, record_ids: List[str]) -> Dict[str, Any]:
+        """
+        Batch delete records. Max 500 records at a time.
+        
+        :param record_ids: List of record_id strings.
+        """
+        if not record_ids:
+            return {}
+            
+        base_token = self._get_base_token(table_id)
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_delete"
+        headers = self.get_headers()
+        
+        # Split into chunks of 500 records
+        chunk_size = 500
+        for i in range(0, len(record_ids), chunk_size):
+            chunk = record_ids[i:i + chunk_size]
+            payload = {"records": chunk}
+            
+            try:
+                logger.info(f"Batch deleting {len(chunk)} records in table {table_id}...")
+                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("code") != 0:
+                    raise ValueError(f"Failed to batch delete records: {data.get('msg')} (code: {data.get('code')})")
+            except Exception as e:
+                logger.error(f"Error batch deleting records: {e}")
+                raise
+                
+        logger.info(f"Successfully batch deleted {len(record_ids)} records.")
+        return {"code": 0, "msg": "success"}
+
+    def fetch_all_users(self) -> Dict[str, str]:
+        """
+        Fetch all users within the app's contact scope and return a mapping of name -> open_id.
+        """
+        url = "https://open.larksuite.com/open-apis/contact/v3/users"
+        user_map = {}
+        page_token = None
+        has_more = True
+        
+        while has_more:
+            params = {
+                "page_size": 100,
+            }
+            if page_token:
+                params["page_token"] = page_token
+                
+            headers = self.get_headers()
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=15)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("code") == 0:
+                    page_data = data.get("data", {})
+                    items = page_data.get("items", [])
+                    for item in items:
+                        name = item.get("name")
+                        open_id = item.get("open_id")
+                        if name and open_id:
+                            user_map[name.strip().lower()] = open_id
+                            
+                    has_more = page_data.get("has_more", False)
+                    page_token = page_data.get("page_token")
+                else:
+                    logger.warning(f"Failed to fetch users: {data.get('msg')} (code: {data.get('code')})")
+                    break
+            except Exception as e:
+                logger.error(f"Error listing users: {e}")
+                break
+                
+        return user_map
+

@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 import os
 import tempfile
-import config_manager
+import config as config_manager
 import config
 
 class TestConfigManager(unittest.TestCase):
@@ -34,6 +34,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(values["LARK_APP_ID"], config.LARK_APP_ID)
         self.assertEqual(values["MAX_ASSIGNMENTS_PER_DAY"], str(config.MAX_ASSIGNMENTS_PER_DAY))
         self.assertEqual(values["COOLDOWN_MINUTES_BETWEEN_CALLS"], str(config.COOLDOWN_MINUTES_BETWEEN_CALLS))
+        self.assertEqual(values["SYNC_INTERVAL_SECONDS"], str(config.SYNC_INTERVAL_SECONDS))
 
     def test_get_current_env_values_from_file(self):
         # Write mock data to the temp .env file
@@ -42,12 +43,14 @@ class TestConfigManager(unittest.TestCase):
             f.write("LARK_APP_ID=\"env_mock_app_id\"\n")
             f.write("LARK_APP_SECRET = env_mock_secret\n")
             f.write("MAX_ASSIGNMENTS_PER_DAY='5'\n")
+            f.write("SYNC_INTERVAL_SECONDS='120'\n")
             
         values = config_manager.get_current_env_values()
         
         self.assertEqual(values["LARK_APP_ID"], "env_mock_app_id")
         self.assertEqual(values["LARK_APP_SECRET"], "env_mock_secret")
         self.assertEqual(values["MAX_ASSIGNMENTS_PER_DAY"], "5")
+        self.assertEqual(values["SYNC_INTERVAL_SECONDS"], "120")
         # Unspecified keys should fall back to empty string or default defined in config_manager
         self.assertEqual(values["COOLDOWN_MINUTES_BETWEEN_CALLS"], "30")
 
@@ -60,7 +63,8 @@ class TestConfigManager(unittest.TestCase):
         new_values = {
             "LARK_APP_ID": "new_id",
             "LARK_APP_SECRET": "new_secret",
-            "MAX_ASSIGNMENTS_PER_DAY": "10"
+            "MAX_ASSIGNMENTS_PER_DAY": "10",
+            "SYNC_INTERVAL_SECONDS": "45"
         }
         
         # Run update
@@ -73,11 +77,13 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(values["LARK_APP_SECRET"], "new_secret")
         self.assertEqual(values["LARK_BASE_TOKEN"], "old_token")
         self.assertEqual(values["MAX_ASSIGNMENTS_PER_DAY"], "10")
+        self.assertEqual(values["SYNC_INTERVAL_SECONDS"], "45")
         
         # Verify globals in config were reloaded
         self.assertEqual(config.LARK_APP_ID, "new_id")
         self.assertEqual(config.LARK_APP_SECRET, "new_secret")
         self.assertEqual(config.MAX_ASSIGNMENTS_PER_DAY, 10)
+        self.assertEqual(config.SYNC_INTERVAL_SECONDS, 45)
 
     @unittest.mock.patch('requests.post')
     @unittest.mock.patch('requests.get')

@@ -8,12 +8,14 @@ import config
 from lark_client import LarkClient
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8')
     client = LarkClient()
     token = client.get_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
     url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{config.LARK_BASE_TOKEN}/tables/{config.TABLE_TIKTOK_ID}/records"
-    r = requests.get(url, headers=headers, timeout=10)
+    params = {"view_id": "vewAGVc1MY"}
+    r = requests.get(url, headers=headers, params=params, timeout=10)
     print("TikTok Records API Response Status:", r.status_code)
     try:
         res = r.json()

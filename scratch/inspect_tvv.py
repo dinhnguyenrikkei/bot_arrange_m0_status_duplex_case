@@ -7,6 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 def test():
+    sys.stdout.reconfigure(encoding='utf-8')
     # Get credentials from config
     app_id = config.LARK_APP_ID
     app_secret = config.LARK_APP_SECRET

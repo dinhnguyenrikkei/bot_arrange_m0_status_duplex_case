@@ -141,6 +141,14 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
         records = client.list_records(config.TABLE_TVV_ID)
         active_agents = []
         
+        # Fetch organization users map for text name to ID mapping fallback
+        user_map = {}
+        try:
+            user_map = client.fetch_all_users()
+            logger.info(f"Fetched {len(user_map)} contact users for fallback name mapping.")
+        except Exception as e:
+            logger.warning(f"Could not fetch contact users for fallback name mapping: {e}")
+        
         # Determine today's date in GMT+7 and candidate formats
         now_vn = datetime.now(tz_vietnam)
         day = now_vn.day
@@ -167,13 +175,18 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
             records, date_candidates
         )
         
-        logger.info(f"Dynamic columns detected: active={active_col}, personnel={personnel_col}, region={region_col}, role={role_col}")
+        # Determine all keys in the sheet
+        all_keys = set()
+        for rec in records:
+            all_keys.update(rec.get("fields", {}).keys())
+            
+        # Priority: Config value first (if present in fields), then auto-detected value
+        active_col = config.FIELD_TVV_ACTIVE if config.FIELD_TVV_ACTIVE in all_keys else (active_col or config.FIELD_TVV_ACTIVE)
+        personnel_col = config.FIELD_TVV_USER if config.FIELD_TVV_USER in all_keys else (personnel_col or config.FIELD_TVV_USER)
+        region_col = config.FIELD_TVV_REGION if config.FIELD_TVV_REGION in all_keys else (region_col or config.FIELD_TVV_REGION)
+        role_col = config.FIELD_TVV_ROLE if config.FIELD_TVV_ROLE in all_keys else (role_col or config.FIELD_TVV_ROLE)
         
-        # Fallbacks to config values if auto-detection failed
-        active_col = active_col or config.FIELD_TVV_ACTIVE
-        personnel_col = personnel_col or config.FIELD_TVV_USER
-        region_col = region_col or config.FIELD_TVV_REGION
-        role_col = role_col or config.FIELD_TVV_ROLE
+        logger.info(f"Final columns selected: active={active_col}, personnel={personnel_col}, region={region_col}, role={role_col}")
         
         for rec in records:
             fields = rec.get("fields", {})
@@ -193,9 +206,18 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
                 continue
                 
             # Parse Personnel field
-            person_info = parse_personnel_field(fields.get(personnel_col))
+            person_val = fields.get(personnel_col)
+            person_info = parse_personnel_field(person_val)
+            if not person_info and isinstance(person_val, str) and person_val.strip():
+                # Fallback to name-to-id mapping
+                norm_name = person_val.strip()
+                user_id = user_map.get(norm_name.lower())
+                if user_id:
+                    person_info = (user_id, norm_name)
+                    logger.info(f"Resolved personnel '{norm_name}' to User ID '{user_id}' via contact mapping.")
+                
             if not person_info:
-                logger.warning(f"TVV record {rec.get('record_id')} has no valid personnel account configured in column '{personnel_col}'.")
+                logger.warning(f"TVV record {rec.get('record_id')} has no valid personnel account configured in column '{personnel_col}' (value: '{person_val}').")
                 continue
                 
             user_id, name = person_info
@@ -288,46 +310,18 @@ def assign_t0_leads_to_tts(client: LarkClient) -> int:
     logger.info("T0 distribution to TTS is disabled.")
     return 0
 
-def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[Dict[str, Any]]:
+def select_best_tvv_for_lead(
+    lead_region: str,
+    target_callback_time: int,
+    active_tvvs: List[Dict[str, Any]],
+    today_assignments: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Any]], int]:
     """
-    Distribute an M0 lead to the best available TVV using:
-    - Availability checks (checkbox active today & schedule availability)
-    - Regional priority
-    - Daily workload limit (config.MAX_ASSIGNMENTS_PER_DAY) with overflow logic
-    - Round-robin (based on count today and last assignment time)
+    Select the best available TVV for a lead using regional preference, cooldown-based availability,
+    and round-robin workload distribution. Shifting callback time if busy.
+    Returns: (selected_tvv_dict, final_callback_time)
     """
-    logger.info(f"Starting M0 distribution for Lead {lead_record_id}...")
-    
-    # 1. Fetch the lead details
-    lead = client.get_record(config.TABLE_TIKTOK_ID, lead_record_id)
-    if not lead:
-        logger.error(f"Lead {lead_record_id} not found.")
-        return None
-        
-    fields = lead.get("fields", {})
-    status = fields.get(config.FIELD_TIKTOK_STATUS)
-    
-    # Check if status is indeed M0
-    if status != "M0":
-        logger.warning(f"Lead {lead_record_id} status is '{status}', not 'M0'. We will still proceed since webhook was triggered.")
-        
-    lead_region = normalize_region(fields.get(config.FIELD_TIKTOK_REGION, ""))
-    callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME) # Millisecond timestamp or None
-    
-    current_time_ms = int(time.time() * 1000)
-    target_callback_time = callback_time if callback_time is not None else current_time_ms
-    
-    logger.info(f"Lead Region: {lead_region}, Original Callback Time: {callback_time}, Target Callback Time: {target_callback_time}")
-    
-    # 2. Fetch active TVVs and today's assignments
-    active_tvvs = fetch_active_agents(client, "TVV")
-    if not active_tvvs:
-        logger.error("No active TVVs found today. Cannot distribute lead.")
-        return None
-        
-    today_assignments = fetch_today_assignments(client)
-    
-    # 3. Calculate metrics for each active TVV
+    # Calculate metrics for each active TVV
     for tvv in active_tvvs:
         # Count assignments today
         tvv_assignments = [a for a in today_assignments if a["assigned_user_id"] == tvv["user_id"]]
@@ -338,10 +332,7 @@ def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[D
         
         # Availability based on schedule
         tvv["is_free"] = check_tvv_availability(tvv["user_id"], target_callback_time, today_assignments)
-        
-        logger.info(f"TVV {tvv['name']} ({tvv['region']}) today count: {tvv['count_today']}, free: {tvv['is_free']}, last assigned: {tvv['last_assigned_time']}")
-        
-    # 4. Match & Route
+
     selected_tvv = None
     
     # Split candidates into primary region and other region
@@ -377,17 +368,57 @@ def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[D
                 selected_tvv = other_tvvs[0]
                 logger.info(f"Selected TVV {selected_tvv['name']} from other region as fallback (busy).")
                 
-    # 5. Perform the assignment
     if selected_tvv:
-        # Determine final callback time
-        if selected_tvv["is_free"]:
-            final_callback_time = target_callback_time
-        else:
-            final_callback_time = find_next_free_slot(selected_tvv["user_id"], target_callback_time, today_assignments)
-            
-        current_time_ms = int(time.time() * 1000)
+        # We always keep the original target callback time and do NOT shift it!
+        return selected_tvv, target_callback_time
+        
+    return None, target_callback_time
+
+def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Distribute a single M0 lead to the best available TVV.
+    """
+    logger.info(f"Starting M0 distribution for Lead {lead_record_id}...")
+    
+    # 1. Fetch the lead details
+    lead = client.get_record(config.TABLE_TIKTOK_ID, lead_record_id)
+    if not lead:
+        logger.error(f"Lead {lead_record_id} not found.")
+        return None
+        
+    fields = lead.get("fields", {})
+    status = fields.get(config.FIELD_TIKTOK_STATUS)
+    
+    # Check if status matches config value
+    if status != config.VALUE_TIKTOK_STATUS_M0:
+        logger.warning(f"Lead {lead_record_id} status is '{status}', not '{config.VALUE_TIKTOK_STATUS_M0}'. We will still proceed since webhook was triggered.")
+        
+    lead_region = normalize_region(fields.get(config.FIELD_TIKTOK_REGION, ""))
+    callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME) # Millisecond timestamp or None
+    
+    current_time_ms = int(time.time() * 1000)
+    target_callback_time = callback_time if callback_time is not None else current_time_ms
+    
+    logger.info(f"Lead Region: {lead_region}, Original Callback Time: {callback_time}, Target Callback Time: {target_callback_time}")
+    
+    # 2. Fetch active TVVs and today's assignments
+    active_tvvs = fetch_active_agents(client, "TVV")
+    if not active_tvvs:
+        logger.error("No active TVVs found today. Cannot distribute lead.")
+        return None
+        
+    today_assignments = fetch_today_assignments(client)
+    
+    # 3. Select best TVV
+    selected_tvv, final_callback_time = select_best_tvv_for_lead(
+        lead_region, target_callback_time, active_tvvs, today_assignments
+    )
+    
+    # 4. Perform the assignment
+    if selected_tvv:
         update_fields = {
             config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": selected_tvv["user_id"]}],
+            config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": selected_tvv["user_id"]}],
             config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms
         }
         
@@ -401,3 +432,73 @@ def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[D
         return selected_tvv
         
     return None
+
+def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Distribute a batch of M0 leads to the best available TVVs in-memory,
+    then perform a batch write to Lark to avoid hitting rate limits.
+    Returns: List of tuples (lead_record_id, selected_tvv_dict)
+    """
+    if not lead_records:
+        return []
+        
+    logger.info(f"Starting batch M0 distribution for {len(lead_records)} leads...")
+    
+    # 1. Fetch active TVVs and today's assignments once
+    active_tvvs = fetch_active_agents(client, "TVV")
+    if not active_tvvs:
+        logger.error("No active TVVs found today. Cannot distribute leads.")
+        return []
+        
+    today_assignments = fetch_today_assignments(client)
+    
+    records_to_update = []
+    assigned_results = []
+    current_time_ms = int(time.time() * 1000)
+    
+    # 2. Iterate and select TVVs in-memory
+    for lead in lead_records:
+        lead_record_id = lead.get("record_id")
+        fields = lead.get("fields", {})
+        
+        lead_region = normalize_region(fields.get(config.FIELD_TIKTOK_REGION, ""))
+        callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME)
+        target_callback_time = callback_time if callback_time is not None else current_time_ms
+        
+        selected_tvv, final_callback_time = select_best_tvv_for_lead(
+            lead_region, target_callback_time, active_tvvs, today_assignments
+        )
+        
+        if selected_tvv:
+            update_fields = {
+                config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": selected_tvv["user_id"]}],
+                config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": selected_tvv["user_id"]}],
+                config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms
+            }
+            
+            if final_callback_time != callback_time:
+                update_fields[config.FIELD_TIKTOK_CALLBACK_TIME] = final_callback_time
+                
+            records_to_update.append({
+                "record_id": lead_record_id,
+                "fields": update_fields
+            })
+            
+            # Append this assignment in-memory to affect subsequent assignments in the batch
+            today_assignments.append({
+                "record_id": lead_record_id,
+                "assigned_user_id": selected_tvv["user_id"],
+                "assigned_time": current_time_ms,
+                "callback_time": final_callback_time
+            })
+            
+            assigned_results.append((lead_record_id, selected_tvv))
+            logger.info(f"Batch routing: Lead {lead_record_id} mapped to TVV {selected_tvv['name']} ({selected_tvv['user_id']}) callback {final_callback_time}")
+            
+    # 3. Perform batch update in Lark
+    if records_to_update:
+        logger.info(f"Performing batch update in Lark for {len(records_to_update)} records...")
+        client.batch_update_records(config.TABLE_TIKTOK_ID, records_to_update)
+        logger.info("Successfully updated batch records.")
+        
+    return assigned_results

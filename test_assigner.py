@@ -287,8 +287,8 @@ class TestLeadAssignment(unittest.TestCase):
         update_fields = args[2]
         self.assertIsNotNone(update_fields.get(config.FIELD_TIKTOK_CALLBACK_TIME))
 
-    def test_assign_m0_lead_with_collision_shifts_time(self):
-        """If a TVV has a conflict, select the TVV and shift callback time to next free slot."""
+    def test_assign_m0_lead_with_collision_does_not_shift_time(self):
+        """If a TVV has a conflict, select the TVV and do NOT shift callback time (keep original)."""
         lead_id = "lead_clash"
         target_time = 1716200000000 # 2026-05-20 approx.
         lead_record = {
@@ -313,9 +313,7 @@ class TestLeadAssignment(unittest.TestCase):
             }
         ]
         
-        # Mock today's assignments: TVV North has a call at target_time and target_time + 30 mins (cooldown)
-        # So next free slot should be target_time + 60 mins
-        cooldown_ms = config.COOLDOWN_MINUTES_BETWEEN_CALLS * 60 * 1000
+        # Mock today's assignments: TVV North has a call at target_time
         today_assignments_records = [
             {
                 "record_id": "prev_l1",
@@ -323,14 +321,6 @@ class TestLeadAssignment(unittest.TestCase):
                     config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_north"}],
                     config.FIELD_TIKTOK_ASSIGNED_TIME: int(time.time() * 1000),
                     config.FIELD_TIKTOK_CALLBACK_TIME: target_time
-                }
-            },
-            {
-                "record_id": "prev_l2",
-                "fields": {
-                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_north"}],
-                    config.FIELD_TIKTOK_ASSIGNED_TIME: int(time.time() * 1000),
-                    config.FIELD_TIKTOK_CALLBACK_TIME: target_time + cooldown_ms
                 }
             }
         ]
@@ -351,11 +341,11 @@ class TestLeadAssignment(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected["user_id"], "user_north")
         
-        # Check update_record was called with the callback time shifted to target_time + 2*cooldown
+        # Check update_record was called, and callback time was NOT modified (not in update_fields)
         self.client.update_record.assert_called_once()
         args = self.client.update_record.call_args[0]
         update_fields = args[2]
-        self.assertEqual(update_fields.get(config.FIELD_TIKTOK_CALLBACK_TIME), target_time + 2 * cooldown_ms)
+        self.assertNotIn(config.FIELD_TIKTOK_CALLBACK_TIME, update_fields)
 
     def test_normalize_region(self):
         from assigner import normalize_region

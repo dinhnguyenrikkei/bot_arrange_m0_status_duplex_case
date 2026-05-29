@@ -8,6 +8,7 @@ from lark_client import LarkClient
 from assigner import fetch_active_agents
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8')
     print("Testing active TVV agent fetching and dynamic column detection...")
     client = LarkClient()
     try:

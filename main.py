@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import asyncio
 import collections
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends
@@ -8,7 +9,15 @@ from pydantic import BaseModel
 from typing import Optional
 import config
 from lark_client import LarkClient
-from assigner import assign_m0_lead_to_tvv, assign_t0_leads_to_tts
+from assigner import assign_m0_lead_to_tvv, assign_t0_leads_to_tts, assign_m0_leads_batch
+
+def get_resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
 
 # Set up log queue for UI console
 log_queue = collections.deque(maxlen=50)
@@ -43,6 +52,19 @@ class ConfigPayload(BaseModel):
     LINK_TABLE_TVV: str
     MAX_ASSIGNMENTS_PER_DAY: Optional[str] = None
     COOLDOWN_MINUTES_BETWEEN_CALLS: str
+    SYNC_INTERVAL_SECONDS: Optional[str] = "60"
+    BOT_ACTIVE: Optional[str] = "False"
+    FIELD_TIKTOK_STATUS: Optional[str] = None
+    VALUE_TIKTOK_STATUS_M0: Optional[str] = None
+    FIELD_TIKTOK_REGION: Optional[str] = None
+    FIELD_TIKTOK_CALLBACK_TIME: Optional[str] = None
+    FIELD_TIKTOK_ASSIGNED_USER: Optional[str] = None
+    FIELD_TIKTOK_RECIPIENT_USER: Optional[str] = None
+    FIELD_TIKTOK_ASSIGNED_TIME: Optional[str] = None
+    FIELD_TVV_USER: Optional[str] = None
+    FIELD_TVV_ACTIVE: Optional[str] = None
+    FIELD_TVV_REGION: Optional[str] = None
+    FIELD_TVV_ROLE: Optional[str] = None
 
 def verify_token(x_webhook_token: str = Header(default=None)):
     """Optional token verification for security."""
@@ -67,55 +89,78 @@ def run_m0_sync_process():
     logger.info("Scanning for unassigned M0 leads to sync...")
     try:
         config.validate_config()
-        records = lark_client.list_records(config.TABLE_TIKTOK_ID)
-        unassigned_m0_count = 0
         
+        # Utilize server-side formula filtering to query ONLY unassigned M0 records.
+        filter_formula = f'AND(CurrentValue.[{config.FIELD_TIKTOK_STATUS}]="{config.VALUE_TIKTOK_STATUS_M0}", CurrentValue.[{config.FIELD_TIKTOK_ASSIGNED_USER}]="")'
+        records = lark_client.list_records(config.TABLE_TIKTOK_ID, filter_formula=filter_formula)
+        
+        # Additional validation pass to filter any records that don't match (for safety)
+        unassigned_records = []
         for rec in records:
             fields = rec.get("fields", {})
             status = fields.get(config.FIELD_TIKTOK_STATUS)
-            
-            if status == "M0":
+            if status == config.VALUE_TIKTOK_STATUS_M0:
                 assigned_user = fields.get(config.FIELD_TIKTOK_ASSIGNED_USER)
                 if not assigned_user or len(assigned_user) == 0:
-                    record_id = rec.get("record_id")
-                    logger.info(f"Sync: Found unassigned M0 lead {record_id}. Distributing...")
-                    result = assign_m0_lead_to_tvv(lark_client, record_id)
-                    if result:
-                        unassigned_m0_count += 1
-                        logger.info(f"Sync: Lead {record_id} successfully assigned to TVV {result['name']}.")
-                    else:
-                        logger.warning(f"Sync: Lead {record_id} could not be assigned to any TVV.")
-                        
-        logger.info(f"Scan complete. Synced/assigned {unassigned_m0_count} M0 leads.")
+                    unassigned_records.append(rec)
+                    
+        unassigned_m0_count = 0
+        if unassigned_records:
+            logger.info(f"Sync: Found {len(unassigned_records)} unassigned M0 leads. Distributing in batch...")
+            results = assign_m0_leads_batch(lark_client, unassigned_records)
+            unassigned_m0_count = len(results)
+            logger.info(f"Sync: Successfully assigned {unassigned_m0_count} out of {len(unassigned_records)} leads.")
+        else:
+            logger.info("Sync: No unassigned M0 leads found.")
+            
         return unassigned_m0_count
     except Exception as e:
         logger.error(f"Error during M0 sync scan: {e}")
         raise e
 
 async def background_sync_loop():
-    """Loop running indefinitely, syncing unassigned M0 leads every 5 minutes."""
+    """Loop running indefinitely, syncing unassigned M0 leads at a configurable interval."""
     await asyncio.sleep(5)
-    logger.info("Real-time background sync loop started (runs every 5 minutes).")
+    logger.info("Real-time background sync loop started.")
     while True:
         try:
-            try:
-                config.validate_config()
-                run_m0_sync_process()
-            except ValueError:
-                # Configuration is not complete yet, skip
+            if config.BOT_ACTIVE:
+                try:
+                    config.validate_config()
+                    run_m0_sync_process()
+                except ValueError:
+                    # Configuration is not complete yet, skip
+                    pass
+            else:
+                # Standby state
                 pass
         except Exception as e:
             logger.error(f"Error in background sync loop: {e}")
         
-        await asyncio.sleep(300)
+        # Responsive sleep checking config.SYNC_INTERVAL_SECONDS every second
+        slept = 0
+        interval = max(5, config.SYNC_INTERVAL_SECONDS)
+        while slept < interval:
+            await asyncio.sleep(1)
+            slept += 1
+            interval = max(5, config.SYNC_INTERVAL_SECONDS)
 
 @app.on_event("startup")
 def on_startup():
     asyncio.create_task(background_sync_loop())
+    try:
+        import webbrowser
+        # Introduce a very slight delay to let the server start listening
+        async def open_browser_later():
+            await asyncio.sleep(1)
+            webbrowser.open(f"http://localhost:{config.PORT}")
+        asyncio.create_task(open_browser_later())
+    except Exception as e:
+        logger.warning(f"Could not automatically open browser: {e}")
 
 @app.get("/")
 def read_root():
-    return FileResponse("static/index.html")
+    return FileResponse(get_resource_path("static/index.html"))
 
 @app.get("/health")
 def health_check():
@@ -151,14 +196,14 @@ def cron_daily_t0(authorized: None = Depends(verify_token)):
 
 @app.get("/api/config")
 def get_config():
-    from config_manager import get_current_env_values
+    from config import get_current_env_values
     return get_current_env_values()
 
 @app.post("/api/config")
 def post_config(payload: ConfigPayload):
-    from config_manager import update_env_values
+    from config import update_env_values
     try:
-        update_env_values(payload.model_dump())
+        update_env_values(payload.model_dump(exclude_none=True))
         return {"status": "success", "message": "Config updated and reloaded"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -177,4 +222,7 @@ def trigger_sync(background_tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, reload=True)
+    if getattr(sys, 'frozen', False):
+        uvicorn.run(app, host="0.0.0.0", port=config.PORT)
+    else:
+        uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, reload=True)
