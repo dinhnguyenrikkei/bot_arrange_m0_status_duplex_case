@@ -32,7 +32,7 @@ FIELD_TVV_ACTIVE = ""
 FIELD_TVV_REGION = ""
 FIELD_TVV_ROLE = ""
 MAX_ASSIGNMENTS_PER_DAY = 2
-COOLDOWN_MINUTES_BETWEEN_CALLS = 30
+COOLDOWN_MINUTES_BETWEEN_CALLS = 15
 SYNC_INTERVAL_SECONDS = 60
 PORT = 8000
 BOT_ACTIVE = False
@@ -75,7 +75,7 @@ def reload_config(dotenv_path=None):
     FIELD_TVV_ROLE = os.getenv("FIELD_TVV_ROLE") or "Vai trò"
 
     MAX_ASSIGNMENTS_PER_DAY = int(os.getenv("MAX_ASSIGNMENTS_PER_DAY", "2"))
-    COOLDOWN_MINUTES_BETWEEN_CALLS = int(os.getenv("COOLDOWN_MINUTES_BETWEEN_CALLS", "30"))
+    COOLDOWN_MINUTES_BETWEEN_CALLS = int(os.getenv("COOLDOWN_MINUTES_BETWEEN_CALLS", "15"))
     SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", "60"))
     PORT = int(os.getenv("PORT", "8000"))
     BOT_ACTIVE = os.getenv("BOT_ACTIVE", "False").lower() in ("true", "1", "yes")
@@ -107,7 +107,7 @@ def get_current_env_values() -> dict:
         "TABLE_TIKTOK_ID": "",
         "TABLE_TVV_ID": "",
         "MAX_ASSIGNMENTS_PER_DAY": "2",
-        "COOLDOWN_MINUTES_BETWEEN_CALLS": "30",
+        "COOLDOWN_MINUTES_BETWEEN_CALLS": "15",
         "SYNC_INTERVAL_SECONDS": "60",
         "PORT": "8000",
         "BOT_ACTIVE": "False",

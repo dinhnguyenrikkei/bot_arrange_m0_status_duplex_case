@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -12,7 +12,7 @@ config.LARK_BASE_TOKEN = "test_base_token"
 config.TABLE_TIKTOK_ID = "test_tiktok_table"
 config.TABLE_TVV_ID = "test_tvv_table"
 config.MAX_ASSIGNMENTS_PER_DAY = 2
-config.COOLDOWN_MINUTES_BETWEEN_CALLS = 30
+config.COOLDOWN_MINUTES_BETWEEN_CALLS = 15
 
 from assigner import (
     check_tvv_availability,
@@ -20,6 +20,9 @@ from assigner import (
     assign_t0_leads_to_tts,
     build_assignment_update_fields,
     get_today_range,
+    fetch_today_schedule,
+    _is_field_empty,
+    assign_m0_leads_batch,
     tz_vietnam
 )
 from lark_client import LarkClient
@@ -40,9 +43,9 @@ class TestLeadAssignment(unittest.TestCase):
         self.assertAlmostEqual(diff_hours, 24.0, delta=0.1)
 
     def test_check_tvv_availability(self):
-        # TVV is busy if they have a callback within 30 minutes of the target callback time.
+        # TVV is busy if they have a callback within 15 minutes of the target callback time.
         target_time = 1716200000000 # 2026-05-20 approx.
-        cooldown_ms = 30 * 60 * 1000
+        cooldown_ms = 15 * 60 * 1000
         
         # Test case 1: No previous assignments today -> Should be Free
         self.assertTrue(check_tvv_availability("user_1", target_time, []))
@@ -53,15 +56,15 @@ class TestLeadAssignment(unittest.TestCase):
         ]
         self.assertFalse(check_tvv_availability("user_1", target_time, assignments))
         
-        # Test case 3: Previous assignment is far away (e.g. 40 minutes before) -> Should be Free
+        # Test case 3: Previous assignment is far away (e.g. 20 minutes before) -> Should be Free
         assignments = [
-            {"assigned_user_id": "user_1", "callback_time": target_time - (40 * 60 * 1000), "assigned_time": int(time.time() * 1000)}
+            {"assigned_user_id": "user_1", "callback_time": target_time - (20 * 60 * 1000), "assigned_time": int(time.time() * 1000)}
         ]
         self.assertTrue(check_tvv_availability("user_1", target_time, assignments))
         
-        # Test case 4: Previous assignment is close (e.g. 20 minutes after) -> Should be Busy
+        # Test case 4: Previous assignment is close (e.g. 10 minutes after) -> Should be Busy
         assignments = [
-            {"assigned_user_id": "user_1", "callback_time": target_time + (20 * 60 * 1000), "assigned_time": int(time.time() * 1000)}
+            {"assigned_user_id": "user_1", "callback_time": target_time + (10 * 60 * 1000), "assigned_time": int(time.time() * 1000)}
         ]
         self.assertFalse(check_tvv_availability("user_1", target_time, assignments))
 
@@ -105,7 +108,7 @@ class TestLeadAssignment(unittest.TestCase):
                 }
             }
         ]
-        self.client.list_records.side_effect = lambda table_id: tvvs_records if table_id == config.TABLE_TVV_ID else []
+        self.client.list_records.side_effect = lambda table_id, **kwargs: tvvs_records if table_id == config.TABLE_TVV_ID else []
         
         # Act
         selected = assign_m0_lead_to_tvv(self.client, lead_id)
@@ -163,7 +166,7 @@ class TestLeadAssignment(unittest.TestCase):
             }
         ]
         
-        def mock_list_records(table_id):
+        def mock_list_records(table_id, **kwargs):
             if table_id == config.TABLE_TVV_ID:
                 return tvvs_records
             elif table_id == config.TABLE_TIKTOK_ID:
@@ -226,7 +229,7 @@ class TestLeadAssignment(unittest.TestCase):
             }
         ]
         
-        def mock_list_records(table_id):
+        def mock_list_records(table_id, **kwargs):
             if table_id == config.TABLE_TVV_ID:
                 return tvvs_records
             elif table_id == config.TABLE_TIKTOK_ID:
@@ -275,7 +278,7 @@ class TestLeadAssignment(unittest.TestCase):
                 }
             }
         ]
-        self.client.list_records.side_effect = lambda table_id: tvvs_records if table_id == config.TABLE_TVV_ID else []
+        self.client.list_records.side_effect = lambda table_id, **kwargs: tvvs_records if table_id == config.TABLE_TVV_ID else []
         
         # Act
         selected = assign_m0_lead_to_tvv(self.client, lead_id)
@@ -328,7 +331,7 @@ class TestLeadAssignment(unittest.TestCase):
             }
         ]
         
-        def mock_list_records(table_id):
+        def mock_list_records(table_id, **kwargs):
             if table_id == config.TABLE_TVV_ID:
                 return tvvs_records
             elif table_id == config.TABLE_TIKTOK_ID:
@@ -443,6 +446,424 @@ class TestLeadAssignment(unittest.TestCase):
         self.assertEqual(active[0]["user_id"], "user_robust")
         self.assertEqual(active[0]["name"], "Robust User")
         self.assertEqual(active[0]["region"], "Miền Nam") # "HCM" normalized
+
+
+class TestFetchTodaySchedule(unittest.TestCase):
+    """Tests for the new fetch_today_schedule function (replaces fetch_today_assignments)."""
+
+    def setUp(self):
+        self.client = MagicMock(spec=LarkClient)
+
+    def test_includes_records_with_callback_today(self):
+        """Records with callback_time in today's range should be included."""
+        start_ms, end_ms = get_today_range()
+        records = [
+            {
+                "record_id": "rec1",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_1", "name": "User 1"}],
+                    config.FIELD_TIKTOK_ASSIGNED_TIME: start_ms - 86400000,  # Assigned yesterday
+                    config.FIELD_TIKTOK_CALLBACK_TIME: start_ms + 3600000   # Callback today
+                }
+            }
+        ]
+        self.client.list_records.return_value = records
+        
+        result = fetch_today_schedule(self.client)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["assigned_user_id"], "user_1")
+
+    def test_includes_records_assigned_today_without_callback(self):
+        """Records assigned today even without callback should be included."""
+        start_ms, _ = get_today_range()
+        records = [
+            {
+                "record_id": "rec2",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_2", "name": "User 2"}],
+                    config.FIELD_TIKTOK_ASSIGNED_TIME: start_ms + 1000,
+                    # No callback time
+                }
+            }
+        ]
+        self.client.list_records.return_value = records
+        
+        result = fetch_today_schedule(self.client)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["assigned_user_id"], "user_2")
+
+    def test_skips_records_without_assigned_user(self):
+        """Records without any assigned user should be skipped."""
+        start_ms, _ = get_today_range()
+        records = [
+            {
+                "record_id": "rec3",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_TIME: start_ms + 1000,
+                    config.FIELD_TIKTOK_CALLBACK_TIME: start_ms + 3600000
+                    # No assigned user
+                }
+            }
+        ]
+        self.client.list_records.return_value = records
+        
+        result = fetch_today_schedule(self.client)
+        self.assertEqual(len(result), 0)
+
+    def test_falls_back_to_recipient_user_for_user_id(self):
+        """If TVV field is empty but Người nhận data is filled, use recipient user_id."""
+        start_ms, _ = get_today_range()
+        records = [
+            {
+                "record_id": "rec4",
+                "fields": {
+                    config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": "user_r", "name": "Recipient"}],
+                    config.FIELD_TIKTOK_ASSIGNED_TIME: start_ms + 1000,
+                    config.FIELD_TIKTOK_CALLBACK_TIME: start_ms + 3600000
+                    # TVV field (FIELD_TIKTOK_ASSIGNED_USER) is empty
+                }
+            }
+        ]
+        self.client.list_records.return_value = records
+        
+        result = fetch_today_schedule(self.client)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["assigned_user_id"], "user_r")
+
+    def test_excludes_old_records_without_today_relevance(self):
+        """Records assigned yesterday with callback yesterday should be excluded."""
+        start_ms, _ = get_today_range()
+        records = [
+            {
+                "record_id": "rec_old",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_old", "name": "Old User"}],
+                    config.FIELD_TIKTOK_ASSIGNED_TIME: start_ms - 86400000,  # Yesterday
+                    config.FIELD_TIKTOK_CALLBACK_TIME: start_ms - 43200000   # Yesterday
+                }
+            }
+        ]
+        self.client.list_records.return_value = records
+        
+        result = fetch_today_schedule(self.client)
+        self.assertEqual(len(result), 0)
+
+
+class TestIsFieldEmpty(unittest.TestCase):
+    """Tests for the _is_field_empty helper."""
+
+    def test_none_is_empty(self):
+        self.assertTrue(_is_field_empty(None))
+
+    def test_empty_list_is_empty(self):
+        self.assertTrue(_is_field_empty([]))
+
+    def test_empty_string_is_empty(self):
+        self.assertTrue(_is_field_empty(""))
+        self.assertTrue(_is_field_empty("   "))
+
+    def test_false_is_empty(self):
+        self.assertTrue(_is_field_empty(False))
+
+    def test_filled_list_is_not_empty(self):
+        self.assertFalse(_is_field_empty([{"id": "user_1"}]))
+
+    def test_filled_string_is_not_empty(self):
+        self.assertFalse(_is_field_empty("some value"))
+
+    def test_filled_dict_is_not_empty(self):
+        self.assertFalse(_is_field_empty({"text": "Name"}))
+
+    def test_empty_link_field_dict_is_empty(self):
+        """Link field (type 18) returns {"link_record_ids": []} when empty."""
+        self.assertTrue(_is_field_empty({"link_record_ids": []}))
+        self.assertTrue(_is_field_empty({"link_record_ids": [], "table_id": "tblXXX"}))
+
+    def test_filled_link_field_dict_is_not_empty(self):
+        """Link field with actual records should not be empty."""
+        self.assertFalse(_is_field_empty({"link_record_ids": ["recABC"]}))
+
+    def test_empty_text_dict_is_empty(self):
+        self.assertTrue(_is_field_empty({"text": ""}))
+        self.assertTrue(_is_field_empty({"text": "  "}))
+
+    # ── DuplexLink (type 21) tests ──
+
+    def test_empty_duplex_link_dict_is_empty(self):
+        """DuplexLink (type 21) returns {"record_ids": []} when empty."""
+        self.assertTrue(_is_field_empty({"record_ids": []}))
+        self.assertTrue(_is_field_empty({"record_ids": [], "table_id": "tblXXX"}))
+
+    def test_filled_duplex_link_dict_is_not_empty(self):
+        """DuplexLink with actual records should not be empty."""
+        self.assertFalse(_is_field_empty({"record_ids": ["recABC"]}))
+
+    def test_empty_duplex_link_list_of_dicts_is_empty(self):
+        """DuplexLink can also return [{"record_ids": [], "table_id": "tblXXX"}]."""
+        self.assertTrue(_is_field_empty([{"record_ids": []}]))
+        self.assertTrue(_is_field_empty([{"record_ids": [], "table_id": "tblXXX"}]))
+
+    def test_filled_duplex_link_list_of_dicts_is_not_empty(self):
+        """DuplexLink list with actual records should not be empty."""
+        self.assertFalse(_is_field_empty([{"record_ids": ["recABC"], "table_id": "tblXXX"}]))
+
+    def test_person_field_list_is_not_empty(self):
+        """Person field like [{"id": "ou_xxx"}] must NOT be treated as empty."""
+        self.assertFalse(_is_field_empty([{"id": "ou_xxx"}]))
+        self.assertFalse(_is_field_empty([{"id": "ou_xxx", "name": "Someone"}]))
+
+
+class TestBatchAssignmentModes(unittest.TestCase):
+    """Tests for the 3 modes of assign_m0_leads_batch."""
+
+    def setUp(self):
+        self.client = MagicMock(spec=LarkClient)
+        self.client.get_field_type.return_value = 11  # Person type by default
+
+    def test_mirror_mode_fills_recipient_via_roundrobin(self):
+        """Mirror mode: TVV filled but Người nhận data empty → fill recipient via round-robin by region."""
+        from datetime import datetime
+        now_vn = datetime.now(tz_vietnam)
+        today_col = now_vn.strftime("%d/%m")
+        
+        leads = [
+            {
+                "record_id": "lead_mirror",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_tvv", "name": "TVV Name"}],
+                    config.FIELD_TIKTOK_RECIPIENT_USER: None,  # Empty
+                    config.FIELD_TIKTOK_REGION: "Miền Bắc",
+                }
+            }
+        ]
+        
+        # Mock dispatch table with active agent (with Người nhận data column)
+        tvv_dispatch_records = [
+            {
+                "record_id": "dispatch_1",
+                "fields": {
+                    config.FIELD_TVV_USER: [{"id": "user_agent", "name": "Agent Name"}],
+                    config.FIELD_TVV_ROLE: "TVV",
+                    config.FIELD_TVV_ACTIVE: True,
+                    config.FIELD_TVV_REGION: "Miền Bắc",
+                    "Người nhận data": [{"id": "user_recipient", "name": "Recipient Person"}],
+                    today_col: True,
+                }
+            }
+        ]
+        
+        def mock_list_records(table_id, **kwargs):
+            if table_id == config.TABLE_TVV_ID:
+                return tvv_dispatch_records
+            elif table_id == config.TABLE_TIKTOK_ID:
+                return []  # No existing assignments
+            return []
+        
+        self.client.list_records.side_effect = mock_list_records
+        
+        results = assign_m0_leads_batch(self.client, leads)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "lead_mirror")
+        self.client.batch_update_records.assert_called_once()
+        
+        # Verify that the recipient_user_id from dispatch table was used
+        call_args = self.client.batch_update_records.call_args[0]
+        records_updated = call_args[1]
+        update_fields = records_updated[0]["fields"]
+        self.assertEqual(update_fields[config.FIELD_TIKTOK_RECIPIENT_USER], [{"id": "user_recipient"}])
+
+    def test_mirror_mode_selects_by_region(self):
+        """Mirror mode: With agents in different regions, round-robin should prefer same region."""
+        from datetime import datetime
+        now_vn = datetime.now(tz_vietnam)
+        today_col = now_vn.strftime("%d/%m")
+        
+        leads = [
+            {
+                "record_id": "lead_north",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_tvv", "name": "TVV"}],
+                    config.FIELD_TIKTOK_RECIPIENT_USER: None,
+                    config.FIELD_TIKTOK_REGION: "Miền Bắc",
+                }
+            }
+        ]
+        
+        tvv_records = [
+            {
+                "record_id": "dispatch_north",
+                "fields": {
+                    config.FIELD_TVV_USER: [{"id": "user_north", "name": "North Agent"}],
+                    config.FIELD_TVV_ROLE: "TVV",
+                    config.FIELD_TVV_ACTIVE: True,
+                    config.FIELD_TVV_REGION: "Miền Bắc",
+                    today_col: True,
+                }
+            },
+            {
+                "record_id": "dispatch_south",
+                "fields": {
+                    config.FIELD_TVV_USER: [{"id": "user_south", "name": "South Agent"}],
+                    config.FIELD_TVV_ROLE: "TVV",
+                    config.FIELD_TVV_ACTIVE: True,
+                    config.FIELD_TVV_REGION: "Miền Nam",
+                    today_col: True,
+                }
+            }
+        ]
+        
+        def mock_list_records(table_id, **kwargs):
+            if table_id == config.TABLE_TVV_ID:
+                return tvv_records
+            elif table_id == config.TABLE_TIKTOK_ID:
+                return []
+            return []
+        
+        self.client.list_records.side_effect = mock_list_records
+        
+        results = assign_m0_leads_batch(self.client, leads)
+        self.assertEqual(len(results), 1)
+        # Should pick the North agent (same region as lead)
+        self.assertEqual(results[0][1]["user_id"], "user_north")
+
+    def test_reverse_mirror_mode_fills_tvv_person(self):
+        """Reverse-mirror mode: Người nhận data filled, TVV empty, Person field → fill TVV."""
+        leads = [
+            {
+                "record_id": "lead_reverse",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: None,  # Empty
+                    config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": "user_recip", "name": "Recipient Name"}],
+                    config.FIELD_TIKTOK_REGION: "Miền Bắc",
+                }
+            }
+        ]
+        
+        self.client.list_records.return_value = []
+        
+        results = assign_m0_leads_batch(self.client, leads)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "lead_reverse")
+        # Check that batch_update was called with TVV person field filled
+        call_args = self.client.batch_update_records.call_args[0]
+        records_updated = call_args[1]
+        self.assertEqual(len(records_updated), 1)
+        update_fields = records_updated[0]["fields"]
+        self.assertEqual(update_fields[config.FIELD_TIKTOK_ASSIGNED_USER], [{"id": "user_recip"}])
+
+    def test_roundrobin_mode_both_empty(self):
+        """Round-robin mode: both fields empty → assign via round-robin."""
+        leads = [
+            {
+                "record_id": "lead_rr",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: None,
+                    config.FIELD_TIKTOK_RECIPIENT_USER: None,
+                    config.FIELD_TIKTOK_REGION: "Miền Bắc",
+                    config.FIELD_TIKTOK_CALLBACK_TIME: None,
+                }
+            }
+        ]
+        
+        # Mock TVV dispatch records for active agents
+        start_ms, _ = get_today_range()
+        now_vn = datetime.now(tz_vietnam)
+        today_col = now_vn.strftime("%d/%m")
+        
+        tvv_records = [
+            {
+                "record_id": "rec_tvv_rr",
+                "fields": {
+                    config.FIELD_TVV_ROLE: "TVV",
+                    config.FIELD_TVV_ACTIVE: True,
+                    config.FIELD_TVV_REGION: "Miền Bắc",
+                    config.FIELD_TVV_USER: [{"id": "user_rr", "name": "Round Robin TVV"}],
+                    today_col: True,
+                }
+            }
+        ]
+        
+        def mock_list_records(table_id, **kwargs):
+            if table_id == config.TABLE_TVV_ID:
+                return tvv_records
+            elif table_id == config.TABLE_TIKTOK_ID:
+                return []  # No existing assignments
+            return []
+
+        self.client.list_records.side_effect = mock_list_records
+        
+        results = assign_m0_leads_batch(self.client, leads)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "lead_rr")
+        self.client.batch_update_records.assert_called_once()
+
+    def test_roundrobin_uses_recipient_user_id_from_dispatch(self):
+        """Round-robin mode: should use recipient_user_id from dispatch table's 'Người nhận data' column."""
+        now_vn = datetime.now(tz_vietnam)
+        today_col = now_vn.strftime("%d/%m")
+        
+        leads = [
+            {
+                "record_id": "lead_rr_recip",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: None,
+                    config.FIELD_TIKTOK_RECIPIENT_USER: None,
+                    config.FIELD_TIKTOK_REGION: "Miền Bắc",
+                    config.FIELD_TIKTOK_CALLBACK_TIME: None,
+                }
+            }
+        ]
+        
+        # Dispatch table has separate Người nhận data column with different user_id
+        tvv_records = [
+            {
+                "record_id": "rec_tvv_dispatch",
+                "fields": {
+                    config.FIELD_TVV_ROLE: "TVV",
+                    config.FIELD_TVV_ACTIVE: True,
+                    config.FIELD_TVV_REGION: "Miền Bắc",
+                    config.FIELD_TVV_USER: [{"id": "user_personnel", "name": "Personnel Name"}],
+                    "Người nhận data": [{"id": "user_nnd", "name": "NND Person"}],
+                    today_col: True,
+                }
+            }
+        ]
+        
+        def mock_list_records(table_id, **kwargs):
+            if table_id == config.TABLE_TVV_ID:
+                return tvv_records
+            elif table_id == config.TABLE_TIKTOK_ID:
+                return []
+            return []
+        
+        self.client.list_records.side_effect = mock_list_records
+        
+        results = assign_m0_leads_batch(self.client, leads)
+        self.assertEqual(len(results), 1)
+        
+        # Verify Người nhận data uses the dispatch table's Người nhận data user_id
+        call_args = self.client.batch_update_records.call_args[0]
+        records_updated = call_args[1]
+        update_fields = records_updated[0]["fields"]
+        self.assertEqual(update_fields[config.FIELD_TIKTOK_RECIPIENT_USER], [{"id": "user_nnd"}])
+
+    def test_skips_fully_assigned_leads(self):
+        """Leads with both TVV and Người nhận data filled should be skipped."""
+        leads = [
+            {
+                "record_id": "lead_full",
+                "fields": {
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": "user_a", "name": "A"}],
+                    config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": "user_a", "name": "A"}],
+                    config.FIELD_TIKTOK_REGION: "Miền Bắc",
+                }
+            }
+        ]
+        
+        results = assign_m0_leads_batch(self.client, leads)
+        self.assertEqual(len(results), 0)
+        self.client.batch_update_records.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

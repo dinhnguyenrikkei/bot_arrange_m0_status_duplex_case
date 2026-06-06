@@ -181,7 +181,23 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
         region_col = config.FIELD_TVV_REGION if config.FIELD_TVV_REGION in all_keys else (region_col or config.FIELD_TVV_REGION)
         role_col = config.FIELD_TVV_ROLE if config.FIELD_TVV_ROLE in all_keys else (role_col or config.FIELD_TVV_ROLE)
         
-        logger.info(f"Final columns selected: active={active_col}, personnel={personnel_col}, region={region_col}, role={role_col}")
+        # Detect "Người nhận data" column in dispatch table
+        recipient_col = None
+        for k in all_keys:
+            k_low = k.lower().strip()
+            if "người nhận" in k_low or "nguoi nhan" in k_low:
+                recipient_col = k
+                break
+        
+        # Detect "Tư vấn viên" Link column in dispatch table
+        tvv_link_col = None
+        for k in all_keys:
+            k_low = k.lower().strip()
+            if "tư vấn" in k_low or "tu van" in k_low:
+                tvv_link_col = k
+                break
+        
+        logger.info(f"Final columns selected: active={active_col}, personnel={personnel_col}, region={region_col}, role={role_col}, recipient={recipient_col}, tvv_link={tvv_link_col}")
         
         for rec in records:
             fields = rec.get("fields", {})
@@ -226,11 +242,36 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
             raw_region = fields.get(region_col, "")
             region = normalize_region(raw_region)
             
+            # Extract recipient user_id from "Người nhận data" column in dispatch table
+            recipient_user_id = None
+            if recipient_col:
+                recipient_val = fields.get(recipient_col)
+                recipient_info = parse_personnel_field(recipient_val)
+                if recipient_info:
+                    recipient_user_id = recipient_info[0]
+            
+            # Extract tvv_link_record_id from "Tư vấn viên" Link column in dispatch table
+            tvv_link_record_id = None
+            if tvv_link_col:
+                tvv_link_val = fields.get(tvv_link_col)
+                if isinstance(tvv_link_val, list) and len(tvv_link_val) > 0:
+                    first = tvv_link_val[0]
+                    if isinstance(first, dict):
+                        rids = first.get("record_ids", [])
+                        if rids:
+                            tvv_link_record_id = rids[0]
+                elif isinstance(tvv_link_val, dict):
+                    rids = tvv_link_val.get("link_record_ids", []) or tvv_link_val.get("record_ids", [])
+                    if rids:
+                        tvv_link_record_id = rids[0]
+            
             active_agents.append({
                 "record_id": rec.get("record_id"),
                 "user_id": user_id,
                 "name": name,
-                "region": region
+                "region": region,
+                "recipient_user_id": recipient_user_id or user_id,
+                "tvv_link_record_id": tvv_link_record_id,
             })
             
         logger.info(f"Found {len(active_agents)} active agents for role '{role}' today.")
@@ -239,36 +280,53 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
         logger.error(f"Error fetching active agents: {e}")
         raise
 
-def fetch_today_assignments(client: LarkClient) -> List[Dict[str, Any]]:
+def fetch_today_schedule(client: LarkClient) -> List[Dict[str, Any]]:
     """
-    Fetch all TikTok leads that were assigned today.
+    Fetch all TikTok leads that have a callback scheduled for today
+    OR were assigned today, regardless of when the lead was created.
+    This ensures schedule conflict detection works across days
+    (e.g. bot was off yesterday, leads from yesterday still count).
     """
     try:
         start_ms, end_ms = get_today_range()
         records = client.list_records(config.TABLE_TIKTOK_ID)
         
-        today_assignments = []
+        today_schedule = []
         for rec in records:
             fields = rec.get("fields", {})
+            callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME)
             assigned_time = fields.get(config.FIELD_TIKTOK_ASSIGNED_TIME)
             
-            # Filter records assigned today
-            if assigned_time and start_ms <= assigned_time <= end_ms:
+            # Include records that:
+            # 1. Have a callback scheduled for today, OR
+            # 2. Were assigned today (even without callback)
+            has_today_callback = callback_time and start_ms <= callback_time <= end_ms
+            assigned_today = assigned_time and start_ms <= assigned_time <= end_ms
+            
+            if has_today_callback or assigned_today:
                 person_info = parse_personnel_field(fields.get(config.FIELD_TIKTOK_ASSIGNED_USER))
                 assigned_user_id = person_info[0] if person_info else None
-                callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME)
                 
-                today_assignments.append({
+                # Also try to get user_id from Người nhận data if TVV field is a link
+                if not assigned_user_id:
+                    recipient_info = parse_personnel_field(fields.get(config.FIELD_TIKTOK_RECIPIENT_USER))
+                    assigned_user_id = recipient_info[0] if recipient_info else None
+                
+                # Skip records without any assigned user
+                if not assigned_user_id:
+                    continue
+                
+                today_schedule.append({
                     "record_id": rec.get("record_id"),
                     "assigned_user_id": assigned_user_id,
                     "assigned_time": assigned_time,
                     "callback_time": callback_time
                 })
                 
-        logger.info(f"Found {len(today_assignments)} data assignments created/assigned today.")
-        return today_assignments
+        logger.info(f"Found {len(today_schedule)} scheduled calls for today.")
+        return today_schedule
     except Exception as e:
-        logger.error(f"Error fetching today assignments: {e}")
+        logger.error(f"Error fetching today schedule: {e}")
         raise
 
 def check_tvv_availability(tvv_user_id: str, target_callback_ms: Optional[int], today_assignments: List[Dict[str, Any]]) -> bool:
@@ -325,15 +383,17 @@ def select_best_tvv_for_lead(
     """
     # Calculate metrics for each active TVV
     for tvv in active_tvvs:
+        # Use recipient_user_id for matching (this is what gets written to TikTok records)
+        match_id = tvv.get("recipient_user_id", tvv["user_id"])
         # Count assignments today
-        tvv_assignments = [a for a in today_assignments if a["assigned_user_id"] == tvv["user_id"]]
+        tvv_assignments = [a for a in today_assignments if a["assigned_user_id"] == match_id]
         tvv["count_today"] = len(tvv_assignments)
         
         # Last assignment time today
         tvv["last_assigned_time"] = max([a["assigned_time"] for a in tvv_assignments]) if tvv_assignments else 0
         
         # Availability based on schedule
-        tvv["is_free"] = check_tvv_availability(tvv["user_id"], target_callback_time, today_assignments)
+        tvv["is_free"] = check_tvv_availability(match_id, target_callback_time, today_assignments)
 
     selected_tvv = None
     
@@ -380,16 +440,21 @@ def build_assignment_update_fields(
     client: LarkClient,
     tvv_user_id: str,
     current_time_ms: int,
+    recipient_user_id: str = None,
 ) -> Dict[str, Any]:
     """
     Build the update fields dict, auto-detecting field types.
     - Person/User fields (type 11): filled with [{"id": tvv_user_id}]
     - Link fields (type 18): skipped (user fills manually or via Lark automation)
     - Unknown/error: falls back to Person format for safety
+    
+    recipient_user_id: If provided, used for 'Người nhận data' instead of tvv_user_id.
     """
+    if recipient_user_id is None:
+        recipient_user_id = tvv_user_id
     update_fields = {
         config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
-        config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": tvv_user_id}],
+        config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_user_id}],
     }
 
     # Auto-detect field type for "Tư vấn viên" column
@@ -555,10 +620,85 @@ def build_tvv_name_to_userid_map(client: LarkClient) -> Dict[str, str]:
     return name_to_userid
 
 
+def build_tvv_name_to_link_map(client: LarkClient) -> Dict[str, str]:
+    """
+    Build a mapping of TVV name (lowercase) → link_record_id from the dispatch table.
+    Used for DuplexLink (type 21) fields where we need the record_id in the linked table
+    (Tỷ lệ chuyển đổi) to write via API format [record_id].
+    """
+    name_to_link = {}
+    try:
+        records = client.list_records(config.TABLE_TVV_ID)
+        
+        all_keys = set()
+        for rec in records:
+            all_keys.update(rec.get("fields", {}).keys())
+        
+        # Find "Tư vấn viên" Link column
+        tvv_link_col = None
+        for k in all_keys:
+            k_low = k.lower().strip()
+            if "tư vấn" in k_low or "tu van" in k_low:
+                tvv_link_col = k
+                break
+        
+        # Find personnel column
+        personnel_col = config.FIELD_TVV_USER if config.FIELD_TVV_USER in all_keys else None
+        if not personnel_col:
+            for k in all_keys:
+                k_low = k.lower().strip()
+                if k_low in ["nhân sự", "nhân viên", "tên", "họ tên"]:
+                    personnel_col = k
+                    break
+        
+        for rec in records:
+            fields = rec.get("fields", {})
+            
+            # Get name
+            person_val = fields.get(personnel_col) if personnel_col else None
+            name = None
+            if isinstance(person_val, list) and len(person_val) > 0:
+                first = person_val[0]
+                if isinstance(first, dict):
+                    name = first.get("name", "").strip()
+            elif isinstance(person_val, str):
+                name = person_val.strip()
+            
+            if not name:
+                continue
+            
+            # Get link_record_id from TVV link column
+            if tvv_link_col:
+                tvv_link_val = fields.get(tvv_link_col)
+                link_rid = None
+                if isinstance(tvv_link_val, list) and len(tvv_link_val) > 0:
+                    first = tvv_link_val[0]
+                    if isinstance(first, dict):
+                        rids = first.get("record_ids", [])
+                        if rids:
+                            link_rid = rids[0]
+                elif isinstance(tvv_link_val, dict):
+                    rids = tvv_link_val.get("link_record_ids", []) or tvv_link_val.get("record_ids", [])
+                    if rids:
+                        link_rid = rids[0]
+                
+                if link_rid:
+                    name_to_link[name.lower()] = link_rid
+    
+    except Exception as e:
+        logger.error(f"Error building TVV name→link_record_id map: {e}")
+    
+    logger.info(f"Built TVV name→link map with {len(name_to_link)} entries.")
+    return name_to_link
+
 
 def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[Dict[str, Any]]:
     """
     Distribute a single M0 lead to the best available TVV.
+    Handles 3 modes:
+    1. TVV filled, Người nhận data empty → round-robin for Người nhận data by region
+    2. Người nhận data filled, TVV empty → find TVV link by matching name
+    3. Both empty → round-robin for Người nhận data + resolve TVV link by name
     """
     logger.info(f"Starting M0 distribution for Lead {lead_record_id}...")
     
@@ -574,53 +714,279 @@ def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[D
     # Check if status matches config value
     if status != config.VALUE_TIKTOK_STATUS_M0:
         logger.warning(f"Lead {lead_record_id} status is '{status}', not '{config.VALUE_TIKTOK_STATUS_M0}'. We will still proceed since webhook was triggered.")
-        
-    lead_region = normalize_region(fields.get(config.FIELD_TIKTOK_REGION, ""))
-    callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME) # Millisecond timestamp or None
     
+    # Detect current state of TVV and Người nhận data fields
+    tvv_field_value = fields.get(config.FIELD_TIKTOK_ASSIGNED_USER)
+    recipient_field_value = fields.get(config.FIELD_TIKTOK_RECIPIENT_USER)
+    tvv_empty = _is_field_empty(tvv_field_value)
+    recipient_empty = _is_field_empty(recipient_field_value)
+    
+    if not tvv_empty and not recipient_empty:
+        logger.info(f"Lead {lead_record_id} already has both TVV and Người nhận data. Skipping.")
+        return None
+    
+    lead_region = normalize_region(fields.get(config.FIELD_TIKTOK_REGION, ""))
+    callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME)
     current_time_ms = int(time.time() * 1000)
     target_callback_time = callback_time if callback_time is not None else current_time_ms
     
-    logger.info(f"Lead Region: {lead_region}, Original Callback Time: {callback_time}, Target Callback Time: {target_callback_time}")
+    logger.info(f"Lead Region: {lead_region}, Callback Time: {callback_time}, TVV empty: {tvv_empty}, Recipient empty: {recipient_empty}")
     
-    # 2. Fetch active TVVs and today's assignments
-    active_tvvs = fetch_active_agents(client, "TVV")
-    if not active_tvvs:
-        logger.error("No active TVVs found today. Cannot distribute lead.")
-        return None
-        
-    today_assignments = fetch_today_assignments(client)
+    update_fields = {}
+    result_info = None
     
-    # 3. Select best TVV
-    selected_tvv, final_callback_time = select_best_tvv_for_lead(
-        lead_region, target_callback_time, active_tvvs, today_assignments
-    )
-    
-    # 4. Perform the assignment
-    if selected_tvv:
-        update_fields = build_assignment_update_fields(
-            client, selected_tvv["user_id"], current_time_ms
+    if not tvv_empty and recipient_empty:
+        # ── Mode 1: TVV filled, Người nhận data empty → round-robin by region ──
+        logger.info(f"Mode 1 (mirror): TVV already filled, selecting Người nhận data by round-robin for Lead {lead_record_id}")
+        active_tvvs = fetch_active_agents(client, "TVV")
+        if not active_tvvs:
+            logger.error("No active agents found. Cannot fill Người nhận data.")
+            return None
+        today_schedule = fetch_today_schedule(client)
+        selected, final_cb = select_best_tvv_for_lead(
+            lead_region, target_callback_time, active_tvvs, today_schedule
         )
-        
-        # Write callback time if it shifted or was None originally
-        if final_callback_time != callback_time:
-            update_fields[config.FIELD_TIKTOK_CALLBACK_TIME] = final_callback_time
-            logger.info(f"Callback time updated/shifted to {final_callback_time} for Lead {lead_record_id} due to overlap or missing time.")
+        if selected:
+            recipient_uid = selected.get("recipient_user_id") or selected["user_id"]
+            update_fields = {
+                config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_uid}],
+                config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+            }
+            if final_cb != callback_time:
+                update_fields[config.FIELD_TIKTOK_CALLBACK_TIME] = final_cb
+            result_info = {"name": selected["name"], "user_id": recipient_uid}
             
+    elif tvv_empty and not recipient_empty:
+        # ── Mode 2: Người nhận data filled, TVV empty → find TVV link by name ──
+        logger.info(f"Mode 2 (reverse-mirror): Người nhận data filled, finding TVV link for Lead {lead_record_id}")
+        person_info = parse_personnel_field(recipient_field_value)
+        if person_info:
+            user_id, person_name = person_info
+            if person_name:
+                field_type = client.get_field_type(
+                    config.TABLE_TIKTOK_ID, config.FIELD_TIKTOK_ASSIGNED_USER
+                )
+                if field_type == 18:
+                    # Link field (one-way SingleLink) cannot be written via API
+                    logger.info(
+                        f"Mode 2: TVV Link field (type 18) cannot be written via API for lead {lead_record_id}. "
+                        f"Người nhận data already filled with '{person_name}'. Skipping TVV link fill."
+                    )
+                elif field_type == 21:
+                    # DuplexLink (two-way) → format: [record_id]
+                    # Build name→link_record_id map to find the right record
+                    tvv_name_map = build_tvv_name_to_link_map(client)
+                    link_rid = tvv_name_map.get(person_name.strip().lower())
+                    if link_rid:
+                        update_fields = {
+                            config.FIELD_TIKTOK_ASSIGNED_USER: [link_rid],
+                            config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+                        }
+                        result_info = {"name": person_name, "user_id": user_id}
+                        logger.info(f"Mode 2: Filled TVV DuplexLink for lead {lead_record_id} → {person_name} ({link_rid})")
+                    else:
+                        logger.warning(f"Mode 2: Could not find link record for '{person_name}'. Skipping TVV fill.")
+                elif field_type == 11:
+                    update_fields = {
+                        config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": user_id}],
+                        config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+                    }
+                    result_info = {"name": person_name, "user_id": user_id}
+            else:
+                logger.warning(f"Could not extract person name from Người nhận data for lead {lead_record_id}")
+        else:
+            logger.warning(f"Could not parse Người nhận data person info for lead {lead_record_id}")
+                    
+    else:
+        # ── Mode 3: Both empty → round-robin for Người nhận data + TVV link ──
+        logger.info(f"Mode 3 (round-robin): Both empty, selecting for Lead {lead_record_id}")
+        active_tvvs = fetch_active_agents(client, "TVV")
+        if not active_tvvs:
+            logger.error("No active TVVs found today. Cannot distribute lead.")
+            return None
+        today_schedule = fetch_today_schedule(client)
+        selected, final_cb = select_best_tvv_for_lead(
+            lead_region, target_callback_time, active_tvvs, today_schedule
+        )
+        if selected:
+            recipient_uid = selected.get("recipient_user_id") or selected["user_id"]
+            update_fields = {
+                config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_uid}],
+                config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+            }
+            # Fill TVV field (Link or Person)
+            field_type = client.get_field_type(
+                config.TABLE_TIKTOK_ID, config.FIELD_TIKTOK_ASSIGNED_USER
+            )
+            if field_type == 18:
+                # Link field (one-way SingleLink) cannot be written via API
+                logger.info(
+                    f"Skipping TVV Link field (type 18) for Lead {lead_record_id} "
+                    f"→ {selected['name']}. Only filling 'Người nhận data'."
+                )
+            elif field_type == 21:
+                # DuplexLink (two-way) → format: [record_id]
+                linked_record_id = selected.get("tvv_link_record_id")
+                if linked_record_id:
+                    update_fields[config.FIELD_TIKTOK_ASSIGNED_USER] = [linked_record_id]
+                    logger.info(f"Filled TVV DuplexLink for Lead {lead_record_id} → {selected['name']} ({linked_record_id})")
+                else:
+                    logger.warning(f"No tvv_link_record_id for {selected['name']}. Skipping TVV fill.")
+            elif field_type == 11:
+                update_fields[config.FIELD_TIKTOK_ASSIGNED_USER] = [{"id": recipient_uid}]
+            elif field_type is None:
+                # Fallback to Person format
+                update_fields[config.FIELD_TIKTOK_ASSIGNED_USER] = [{"id": recipient_uid}]
+            
+            if final_cb != callback_time:
+                update_fields[config.FIELD_TIKTOK_CALLBACK_TIME] = final_cb
+            result_info = selected
+    
+    # Write update to Lark
+    if update_fields:
         client.update_record(config.TABLE_TIKTOK_ID, lead_record_id, update_fields)
-        logger.info(f"Successfully assigned lead {lead_record_id} to TVV {selected_tvv['name']} ({selected_tvv['user_id']})")
-        return selected_tvv
+        logger.info(f"Successfully processed lead {lead_record_id}: {result_info}")
+        return result_info
         
     return None
 
+def _is_field_empty(field_value: Any) -> bool:
+    """Check if a Lark field value is effectively empty.
+    Handles: None, False, [], "", dict Link fields like {"link_record_ids": []},
+    and DuplexLink (type 21) fields like {"record_ids": [], "table_id": "tblXXX"}
+    or [{"record_ids": [], "table_id": "tblXXX"}].
+    """
+    if not field_value:
+        return True
+    if isinstance(field_value, list):
+        if len(field_value) == 0:
+            return True
+        # DuplexLink can return a list of dicts like [{"record_ids": [], ...}]
+        # Check if ALL items in the list are "empty link" dicts
+        if all(isinstance(item, dict) for item in field_value):
+            all_empty = True
+            for item in field_value:
+                rids = item.get("record_ids", item.get("link_record_ids"))
+                if rids is not None:
+                    if len(rids) > 0:
+                        all_empty = False
+                        break
+                else:
+                    # Dict without record_ids/link_record_ids → not a link structure,
+                    # treat as non-empty (e.g. Person field [{"id": "ou_xxx"}])
+                    all_empty = False
+                    break
+            if all_empty:
+                return True
+    if isinstance(field_value, str) and not field_value.strip():
+        return True
+    # Handle Link field (type 18): empty link returns dict like
+    # {"link_record_ids": []} or {"link_record_ids": [], "table_id": "tblXXX"}
+    # Handle DuplexLink (type 21): empty link returns dict like
+    # {"record_ids": [], "table_id": "tblXXX"}
+    if isinstance(field_value, dict):
+        link_ids = field_value.get("link_record_ids")
+        if link_ids is not None:
+            return len(link_ids) == 0
+        # DuplexLink uses "record_ids" key
+        record_ids = field_value.get("record_ids")
+        if record_ids is not None:
+            return len(record_ids) == 0
+        # Also handle {"text": ""} or {"text_arr": []} etc.
+        text = field_value.get("text")
+        if text is not None:
+            return not str(text).strip()
+        text_arr = field_value.get("text_arr")
+        if text_arr is not None:
+            return len(text_arr) == 0
+    return False
+
+
+def resolve_tvv_link_record_id(
+    client: LarkClient,
+    tvv_name: str,
+    _cache: Dict[str, Any] = {}
+) -> Optional[str]:
+    """
+    Find the record_id of a TVV in the linked table (Tỷ lệ chuyển đổi)
+    by matching name. Uses the link field's metadata to discover the
+    linked table, then searches for the matching record.
+    
+    Returns the record_id in the linked table, or None if not found.
+    """
+    # Get linked table info from field metadata (cached)
+    if "linked_table_id" not in _cache or "linked_base_token" not in _cache:
+        try:
+            fields = client.list_fields(config.TABLE_TIKTOK_ID)
+            for f in fields:
+                if f.get("field_name") == config.FIELD_TIKTOK_ASSIGNED_USER and f.get("type") == 18:
+                    prop = f.get("property", {})
+                    linked_table_id = prop.get("table_id")
+                    if linked_table_id:
+                        _cache["linked_table_id"] = linked_table_id
+                        # The linked table may be in the same base
+                        _cache["linked_base_token"] = config.LARK_BASE_TOKEN
+                        logger.info(f"Discovered linked table for TVV field: {linked_table_id}")
+                    break
+        except Exception as e:
+            logger.warning(f"Could not discover linked table for TVV field: {e}")
+            return None
+    
+    linked_table_id = _cache.get("linked_table_id")
+    if not linked_table_id:
+        logger.warning("No linked table found for TVV field. Cannot resolve link record.")
+        return None
+    
+    # Build name → record_id map for linked table (cached)
+    if "name_to_record_id" not in _cache:
+        try:
+            linked_records = client.list_records(linked_table_id)
+            name_map = {}
+            for rec in linked_records:
+                rec_fields = rec.get("fields", {})
+                # Try common name columns in the linked table
+                for name_col in ["Họ và tên nhân viên", "Họ và tên", "Họ tên", "Tên", "Nhân sự", "Tư vấn viên"]:
+                    val = rec_fields.get(name_col)
+                    if isinstance(val, str) and val.strip():
+                        name_map[val.strip().lower()] = rec.get("record_id")
+                        break
+                    elif isinstance(val, list) and len(val) > 0:
+                        # Person field
+                        person = val[0] if isinstance(val[0], dict) else None
+                        if person:
+                            pname = person.get("name", "").strip()
+                            if pname:
+                                name_map[pname.lower()] = rec.get("record_id")
+                                break
+            _cache["name_to_record_id"] = name_map
+            logger.info(f"Built linked table name map with {len(name_map)} entries.")
+        except Exception as e:
+            logger.warning(f"Error building linked table name map: {e}")
+            _cache["name_to_record_id"] = {}
+    
+    name_map = _cache.get("name_to_record_id", {})
+    record_id = name_map.get(tvv_name.strip().lower())
+    if record_id:
+        logger.info(f"Resolved TVV '{tvv_name}' to linked record_id '{record_id}'.")
+    else:
+        logger.warning(f"Could not find TVV '{tvv_name}' in linked table.")
+    return record_id
+
+
 def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    Distribute a batch of M0 leads to TVVs, supporting two modes:
+    Distribute a batch of M0 leads to TVVs, supporting three modes:
     
-    1. Mirror mode: If 'Tư vấn viên' (Link field) is already filled, extract the TVV name,
-       look up the user_id from the dispatch table, and fill 'Người nhận data' only.
-    2. Round-robin mode: If 'Tư vấn viên' is empty, use the original round-robin logic
-       to select the best TVV and fill both fields.
+    1. Mirror mode: If 'Tư vấn viên' (Link field) is already filled but
+       'Người nhận data' is empty, select 'Người nhận data' via round-robin
+       by region from active agents in the dispatch table.
+    2. Reverse-mirror mode: If 'Người nhận data' is already filled but
+       'Tư vấn viên' is empty, extract the person name, find the matching
+       record in the linked table (Tỷ lệ chuyển đổi), and fill 'Tư vấn viên'
+       as a one-way link.
+    3. Round-robin mode: If both fields are empty, select 'Người nhận data'
+       via round-robin by region from the dispatch table, then find matching
+       TVV link by name from 'Tỷ lệ chuyển đổi'.
     
     Returns: List of tuples (lead_record_id, selected_tvv_dict)
     """
@@ -633,55 +999,171 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
     records_to_update = []
     assigned_results = []
     
-    # Separate leads into mirror-mode and round-robin-mode
-    mirror_leads = []
-    roundrobin_leads = []
+    # Lazy-loaded shared state for mirror mode and round-robin mode
+    active_tvvs = None
+    today_schedule = None
+    tvv_name_map = None  # For DuplexLink reverse-mirror: name → link_record_id
+    
+    # Separate leads into mirror-mode, reverse-mirror-mode, and round-robin-mode
+    mirror_leads = []          # Has TVV, missing Người nhận data
+    reverse_mirror_leads = []  # Has Người nhận data, missing TVV
+    roundrobin_leads = []      # Missing both
     
     for lead in lead_records:
         fields = lead.get("fields", {})
         tvv_field_value = fields.get(config.FIELD_TIKTOK_ASSIGNED_USER)
-        tvv_name = extract_tvv_name_from_field(tvv_field_value)
+        recipient_field_value = fields.get(config.FIELD_TIKTOK_RECIPIENT_USER)
         
-        if tvv_name:
-            mirror_leads.append((lead, tvv_name))
-        else:
+        tvv_empty = _is_field_empty(tvv_field_value)
+        recipient_empty = _is_field_empty(recipient_field_value)
+        
+        if not tvv_empty and recipient_empty:
+            # Mirror mode: TVV filled, Người nhận data missing
+            tvv_name = extract_tvv_name_from_field(tvv_field_value)
+            if tvv_name:
+                mirror_leads.append((lead, tvv_name))
+            else:
+                roundrobin_leads.append(lead)
+        elif tvv_empty and not recipient_empty:
+            # Reverse-mirror mode: Người nhận data filled, TVV missing
+            reverse_mirror_leads.append(lead)
+        elif tvv_empty and recipient_empty:
+            # Round-robin mode: both empty
             roundrobin_leads.append(lead)
+        # else: both filled → skip (already fully assigned)
     
-    logger.info(f"Leads with TVV pre-assigned (mirror mode): {len(mirror_leads)}, "
-                f"Leads without TVV (round-robin mode): {len(roundrobin_leads)}")
+    logger.info(f"Leads: mirror={len(mirror_leads)}, reverse-mirror={len(reverse_mirror_leads)}, "
+                f"round-robin={len(roundrobin_leads)}")
     
-    # ── Mirror mode: TVV already assigned, just fill Người nhận data ──
+    # ── Mirror mode: TVV already assigned, fill Người nhận data via round-robin by region ──
     if mirror_leads:
-        tvv_name_map = build_tvv_name_to_userid_map(client)
+        # Pre-fetch active agents and schedule (shared with round-robin if needed)
+        if active_tvvs is None:
+            active_tvvs = fetch_active_agents(client, "TVV")
+        if today_schedule is None and active_tvvs:
+            today_schedule = fetch_today_schedule(client)
         
-        for lead, tvv_name in mirror_leads:
+        if not active_tvvs:
+            logger.error("No active agents found. Cannot fill Người nhận data for mirror leads.")
+        else:
+            for lead, tvv_name in mirror_leads:
+                lead_record_id = lead.get("record_id")
+                fields = lead.get("fields", {})
+                lead_region = normalize_region(fields.get(config.FIELD_TIKTOK_REGION, ""))
+                callback_time = fields.get(config.FIELD_TIKTOK_CALLBACK_TIME)
+                target_callback_time = callback_time if callback_time is not None else current_time_ms
+                
+                selected, final_cb = select_best_tvv_for_lead(
+                    lead_region, target_callback_time, active_tvvs, today_schedule
+                )
+                
+                if selected:
+                    recipient_uid = selected.get("recipient_user_id") or selected["user_id"]
+                    update_fields = {
+                        config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_uid}],
+                        config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+                    }
+                    if final_cb != callback_time:
+                        update_fields[config.FIELD_TIKTOK_CALLBACK_TIME] = final_cb
+                    
+                    records_to_update.append({
+                        "record_id": lead_record_id,
+                        "fields": update_fields
+                    })
+                    
+                    # Track in schedule for subsequent round-robin fairness
+                    today_schedule.append({
+                        "record_id": lead_record_id,
+                        "assigned_user_id": recipient_uid,
+                        "assigned_time": current_time_ms,
+                        "callback_time": final_cb
+                    })
+                    
+                    assigned_results.append((lead_record_id, {"name": selected["name"], "user_id": recipient_uid}))
+                    logger.info(f"Mirror mode: Lead {lead_record_id} → Người nhận data = {selected['name']} ({recipient_uid}) [round-robin by region={lead_region}]")
+                else:
+                    logger.warning(f"Mirror mode: Could not select agent for lead {lead_record_id}. Skipping.")
+    
+    # ── Reverse-mirror mode: Người nhận data filled, TVV link missing ──
+    if reverse_mirror_leads:
+        # Clear the link record cache for each batch run
+        link_cache = {}
+        
+        for lead in reverse_mirror_leads:
             lead_record_id = lead.get("record_id")
-            tvv_name_lower = tvv_name.lower().strip()
-            user_id = tvv_name_map.get(tvv_name_lower)
+            fields = lead.get("fields", {})
             
-            if user_id:
+            recipient_value = fields.get(config.FIELD_TIKTOK_RECIPIENT_USER)
+            person_info = parse_personnel_field(recipient_value)
+            
+            if not person_info:
+                logger.warning(f"Reverse-mirror: Lead {lead_record_id} has Người nhận data "
+                             f"but cannot parse person info. Skipping.")
+                continue
+            
+            user_id, person_name = person_info
+            if not person_name:
+                logger.warning(f"Reverse-mirror: Lead {lead_record_id} has Người nhận data "
+                             f"but no person name. Skipping.")
+                continue
+            
+            # Check if TVV field is a Link field (type 18)
+            field_type = client.get_field_type(
+                config.TABLE_TIKTOK_ID, config.FIELD_TIKTOK_ASSIGNED_USER
+            )
+            
+            if field_type == 18:
+                # Link field (one-way SingleLink) cannot be written via API
+                logger.info(
+                    f"Reverse-mirror: TVV Link field (type 18) cannot be written via API for lead {lead_record_id}. "
+                    f"Người nhận data already filled with '{person_name}'. Skipping."
+                )
+            elif field_type == 21:
+                # DuplexLink (two-way) → format: [record_id]
+                if tvv_name_map is None:
+                    tvv_name_map = build_tvv_name_to_link_map(client)
+                link_rid = tvv_name_map.get(person_name.strip().lower())
+                if link_rid:
+                    update_fields = {
+                        config.FIELD_TIKTOK_ASSIGNED_USER: [link_rid],
+                        config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+                    }
+                    records_to_update.append({
+                        "record_id": lead_record_id,
+                        "fields": update_fields
+                    })
+                    assigned_results.append((lead_record_id, {"name": person_name, "user_id": user_id}))
+                    logger.info(f"Reverse-mirror: Lead {lead_record_id} → TVV DuplexLink = {person_name} ({link_rid})")
+                else:
+                    logger.warning(f"Reverse-mirror: Could not find link record for '{person_name}'. Skipping.")
+            elif field_type == 11:
+                # Person field: fill directly with user_id
                 update_fields = {
-                    config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": user_id}],
+                    config.FIELD_TIKTOK_ASSIGNED_USER: [{"id": user_id}],
                     config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
                 }
                 records_to_update.append({
                     "record_id": lead_record_id,
                     "fields": update_fields
                 })
-                assigned_results.append((lead_record_id, {"name": tvv_name, "user_id": user_id}))
-                logger.info(f"Mirror mode: Lead {lead_record_id} → Người nhận data = {tvv_name} ({user_id})")
+                assigned_results.append((lead_record_id, {"name": person_name, "user_id": user_id}))
+                logger.info(f"Reverse-mirror: Lead {lead_record_id} → TVV person = {person_name} ({user_id})")
             else:
-                logger.warning(f"Mirror mode: Could not find user_id for TVV '{tvv_name}' "
-                             f"(lead {lead_record_id}). Falling back to round-robin.")
-                roundrobin_leads.append(lead)
+                logger.warning(f"Reverse-mirror: TVV field type is {field_type}, unsupported. Skipping lead {lead_record_id}.")
     
-    # ── Round-robin mode: no TVV assigned, use standard selection ──
+    # ── Round-robin mode: both fields empty, use standard selection ──
     if roundrobin_leads:
-        active_tvvs = fetch_active_agents(client, "TVV")
+        # Reuse active agents and schedule from mirror mode if already fetched
+        if active_tvvs is None:
+            active_tvvs = fetch_active_agents(client, "TVV")
+        if today_schedule is None and active_tvvs:
+            today_schedule = fetch_today_schedule(client)
+        
         if not active_tvvs:
             logger.error("No active TVVs found today. Cannot distribute remaining leads via round-robin.")
         else:
-            today_assignments = fetch_today_assignments(client)
+            # Cache for link resolution across all round-robin leads
+            rr_link_cache = {}
             
             for lead in roundrobin_leads:
                 lead_record_id = lead.get("record_id")
@@ -692,13 +1174,39 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
                 target_callback_time = callback_time if callback_time is not None else current_time_ms
                 
                 selected_tvv, final_callback_time = select_best_tvv_for_lead(
-                    lead_region, target_callback_time, active_tvvs, today_assignments
+                    lead_region, target_callback_time, active_tvvs, today_schedule
                 )
                 
                 if selected_tvv:
-                    update_fields = build_assignment_update_fields(
-                        client, selected_tvv["user_id"], current_time_ms
+                    recipient_uid = selected_tvv.get("recipient_user_id") or selected_tvv["user_id"]
+                    update_fields = {
+                        config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_uid}],
+                        config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
+                    }
+                    
+                    # Fill TVV field (Link or Person)
+                    field_type = client.get_field_type(
+                        config.TABLE_TIKTOK_ID, config.FIELD_TIKTOK_ASSIGNED_USER
                     )
+                    if field_type == 18:
+                        # Link field (one-way SingleLink) cannot be written via API
+                        logger.info(
+                            f"Round-robin: Skipping TVV Link field (type 18) for Lead {lead_record_id} "
+                            f"→ {selected_tvv['name']}. Only filling 'Người nhận data'."
+                        )
+                    elif field_type == 21:
+                        # DuplexLink (two-way) → format: [record_id]
+                        linked_record_id = selected_tvv.get("tvv_link_record_id")
+                        if linked_record_id:
+                            update_fields[config.FIELD_TIKTOK_ASSIGNED_USER] = [linked_record_id]
+                            logger.info(f"Round-robin: Filled TVV DuplexLink for Lead {lead_record_id} → {selected_tvv['name']} ({linked_record_id})")
+                        else:
+                            logger.warning(f"Round-robin: No tvv_link_record_id for {selected_tvv['name']}. Skipping TVV fill.")
+                    elif field_type == 11:
+                        update_fields[config.FIELD_TIKTOK_ASSIGNED_USER] = [{"id": recipient_uid}]
+                    elif field_type is None:
+                        # Fallback to Person format
+                        update_fields[config.FIELD_TIKTOK_ASSIGNED_USER] = [{"id": recipient_uid}]
                     
                     if final_callback_time != callback_time:
                         update_fields[config.FIELD_TIKTOK_CALLBACK_TIME] = final_callback_time
@@ -709,15 +1217,15 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
                     })
                     
                     # Append this assignment in-memory to affect subsequent assignments
-                    today_assignments.append({
+                    today_schedule.append({
                         "record_id": lead_record_id,
-                        "assigned_user_id": selected_tvv["user_id"],
+                        "assigned_user_id": recipient_uid,
                         "assigned_time": current_time_ms,
                         "callback_time": final_callback_time
                     })
                     
                     assigned_results.append((lead_record_id, selected_tvv))
-                    logger.info(f"Round-robin: Lead {lead_record_id} → TVV {selected_tvv['name']} ({selected_tvv['user_id']})")
+                    logger.info(f"Round-robin: Lead {lead_record_id} → Người nhận data={selected_tvv['name']} ({recipient_uid})")
     
     # ── Batch write to Lark ──
     if records_to_update:

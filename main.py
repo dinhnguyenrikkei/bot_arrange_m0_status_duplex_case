@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import Optional
 import config
 from lark_client import LarkClient
-from assigner import assign_m0_lead_to_tvv, assign_t0_leads_to_tts, assign_m0_leads_batch
+from assigner import assign_m0_lead_to_tvv, assign_t0_leads_to_tts, assign_m0_leads_batch, _is_field_empty
 
 def get_resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -97,14 +97,22 @@ def run_m0_sync_process():
         filter_formula = f'CurrentValue.[{config.FIELD_TIKTOK_STATUS}]="{config.VALUE_TIKTOK_STATUS_M0}"'
         records = lark_client.list_records(config.TABLE_TIKTOK_ID, filter_formula=filter_formula)
         
-        # Client-side validation: find M0 leads where "Người nhận data" is empty
+        # Client-side validation: find M0 leads where either field is empty
         unassigned_records = []
         for rec in records:
             fields = rec.get("fields", {})
             status = fields.get(config.FIELD_TIKTOK_STATUS)
             if status == config.VALUE_TIKTOK_STATUS_M0:
                 recipient_user = fields.get(config.FIELD_TIKTOK_RECIPIENT_USER)
-                if not recipient_user or (isinstance(recipient_user, list) and len(recipient_user) == 0):
+                assigned_user = fields.get(config.FIELD_TIKTOK_ASSIGNED_USER)
+                recipient_empty = _is_field_empty(recipient_user)
+                assigned_empty = _is_field_empty(assigned_user)
+                logger.debug(
+                    f"Lead {rec.get('record_id')}: "
+                    f"recipient_raw={recipient_user!r} (empty={recipient_empty}), "
+                    f"assigned_raw={assigned_user!r} (empty={assigned_empty})"
+                )
+                if recipient_empty or assigned_empty:
                     unassigned_records.append(rec)
                     
         unassigned_m0_count = 0
