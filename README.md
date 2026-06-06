@@ -104,3 +104,4 @@ Khi một dòng dữ liệu được chuyển trạng thái sang `M0`, chúng ta
 * Cấu hình một công cụ lập lịch chạy (Cron Job) trên máy chủ hoặc sử dụng các dịch vụ như GitHub Actions, Google Cloud Scheduler để gửi một request HTTP POST hàng ngày vào lúc 8:00 AM (giờ Việt Nam) tới:
   `https://xxxx.ngrok-free.app/cron/daily-t0`
 * Khi nhận được request này, server sẽ tự động chạy ngầm logic lấy data T0 và chia xoay vòng cho các TTS đang tích `Đi làm hôm nay`.
+# bot_arrange_m0_status_duplex_case
