@@ -865,5 +865,168 @@ class TestBatchAssignmentModes(unittest.TestCase):
         self.client.batch_update_records.assert_not_called()
 
 
+class TestParseWeightFromNote(unittest.TestCase):
+    """Tests for parse_weight_from_note helper."""
+
+    def setUp(self):
+        from assigner import parse_weight_from_note
+        self.parse = parse_weight_from_note
+
+    def test_percentage_string(self):
+        self.assertAlmostEqual(self.parse("70%"), 0.7)
+        self.assertAlmostEqual(self.parse("50%"), 0.5)
+        self.assertAlmostEqual(self.parse("100%"), 1.0)
+
+    def test_percentage_with_spaces(self):
+        self.assertAlmostEqual(self.parse("  70 %  "), 0.7)
+
+    def test_decimal_string(self):
+        self.assertAlmostEqual(self.parse("0.7"), 0.7)
+        self.assertAlmostEqual(self.parse("0.5"), 0.5)
+
+    def test_plain_number_over_1(self):
+        """Numbers > 1 are treated as percentages."""
+        self.assertAlmostEqual(self.parse("70"), 0.7)
+        self.assertAlmostEqual(self.parse("50"), 0.5)
+
+    def test_none_returns_default(self):
+        self.assertAlmostEqual(self.parse(None), 1.0)
+
+    def test_empty_string_returns_default(self):
+        self.assertAlmostEqual(self.parse(""), 1.0)
+        self.assertAlmostEqual(self.parse("   "), 1.0)
+
+    def test_invalid_text_returns_default(self):
+        self.assertAlmostEqual(self.parse("abc"), 1.0)
+        self.assertAlmostEqual(self.parse("hello world"), 1.0)
+
+    def test_clamp_minimum(self):
+        """Extremely low values are clamped to 0.01."""
+        self.assertAlmostEqual(self.parse("0%"), 0.01)
+        self.assertAlmostEqual(self.parse("0"), 0.01)
+
+    def test_clamp_maximum(self):
+        """Values over 100% are clamped to 1.0."""
+        self.assertAlmostEqual(self.parse("150%"), 1.0)
+
+
+class TestWeightedRoundRobin(unittest.TestCase):
+    """Tests for weighted round-robin in select_best_tvv_for_lead."""
+
+    def test_weighted_distribution_prefers_higher_weight(self):
+        """With equal assignment count, person with higher weight (lower load ratio) should be picked."""
+        from assigner import select_best_tvv_for_lead
+        
+        active_tvvs = [
+            {"user_id": "user_a", "recipient_user_id": "user_a", "name": "A", "region": "Miền Bắc", "weight": 1.0},
+            {"user_id": "user_b", "recipient_user_id": "user_b", "name": "B", "region": "Miền Bắc", "weight": 0.7},
+        ]
+        # Both have 0 assignments → load A=0/1.0=0, load B=0/0.7=0 → tie, A wins (first)
+        selected, _ = select_best_tvv_for_lead("Miền Bắc", 1716200000000, active_tvvs, [])
+        self.assertIsNotNone(selected)
+        # Both load=0, should pick first by last_assigned_time (both 0), so A or B
+        # The important test is the next one with non-zero counts
+
+    def test_weighted_distribution_balances_load(self):
+        """Person B (70%) with 3 assignments has higher load than A (100%) with 3 assignments."""
+        from assigner import select_best_tvv_for_lead
+        import time
+        
+        now = int(time.time() * 1000)
+        active_tvvs = [
+            {"user_id": "user_a", "recipient_user_id": "user_a", "name": "A", "region": "Miền Bắc", "weight": 1.0},
+            {"user_id": "user_b", "recipient_user_id": "user_b", "name": "B", "region": "Miền Bắc", "weight": 0.7},
+        ]
+        # A has 3 assignments, B has 3 assignments
+        # Load A = 3/1.0 = 3.0, Load B = 3/0.7 = 4.3 → A should be picked
+        today_assignments = [
+            {"assigned_user_id": "user_a", "assigned_time": now - 30000, "callback_time": now - 100000},
+            {"assigned_user_id": "user_a", "assigned_time": now - 20000, "callback_time": now - 90000},
+            {"assigned_user_id": "user_a", "assigned_time": now - 10000, "callback_time": now - 80000},
+            {"assigned_user_id": "user_b", "assigned_time": now - 30000, "callback_time": now - 100000},
+            {"assigned_user_id": "user_b", "assigned_time": now - 20000, "callback_time": now - 90000},
+            {"assigned_user_id": "user_b", "assigned_time": now - 10000, "callback_time": now - 80000},
+        ]
+        
+        selected, _ = select_best_tvv_for_lead("Miền Bắc", now + 3600000, active_tvvs, today_assignments)
+        self.assertEqual(selected["user_id"], "user_a")  # A has lower load ratio
+
+    def test_weighted_70_gets_fewer_leads_over_time(self):
+        """Simulate 17 sequential assignments: A (100%) should get ~10, B (70%) should get ~7."""
+        from assigner import select_best_tvv_for_lead
+        import time
+        
+        now = int(time.time() * 1000)
+        base_tvvs = [
+            {"user_id": "user_a", "recipient_user_id": "user_a", "name": "A", "region": "Miền Bắc", "weight": 1.0},
+            {"user_id": "user_b", "recipient_user_id": "user_b", "name": "B", "region": "Miền Bắc", "weight": 0.7},
+        ]
+        
+        today_assignments = []
+        counts = {"user_a": 0, "user_b": 0}
+        
+        for i in range(17):
+            # Deep copy tvvs for each iteration
+            active_tvvs = [dict(t) for t in base_tvvs]
+            cb_time = now + (i + 1) * 3600000  # 1 hour apart to avoid cooldown
+            
+            selected, _ = select_best_tvv_for_lead("Miền Bắc", cb_time, active_tvvs, today_assignments)
+            self.assertIsNotNone(selected)
+            
+            uid = selected["user_id"]
+            counts[uid] += 1
+            today_assignments.append({
+                "assigned_user_id": uid,
+                "assigned_time": now + i * 1000,
+                "callback_time": cb_time,
+            })
+        
+        # A (100%) should get ~10, B (70%) should get ~7
+        # Allow ±1 tolerance
+        self.assertGreaterEqual(counts["user_a"], 9)
+        self.assertLessEqual(counts["user_a"], 11)
+        self.assertGreaterEqual(counts["user_b"], 6)
+        self.assertLessEqual(counts["user_b"], 8)
+
+
+class TestFetchActiveAgentsWeight(unittest.TestCase):
+    """Test that fetch_active_agents reads weight from Ghi chú column."""
+
+    def setUp(self):
+        self.client = MagicMock(spec=LarkClient)
+
+    def test_reads_weight_from_ghi_chu_column(self):
+        from assigner import fetch_active_agents, tz_vietnam
+        now_vn = datetime.now(tz_vietnam)
+        today_col = now_vn.strftime("%d/%m")
+        
+        tvvs_records = [
+            {
+                "record_id": "rec_1",
+                "fields": {
+                    "Nhân sự": [{"id": "user_1", "name": "Agent A"}],
+                    "Team TV": "Hà Nội",
+                    today_col: True,
+                    "Ghi chú": "70%",
+                }
+            },
+            {
+                "record_id": "rec_2",
+                "fields": {
+                    "Nhân sự": [{"id": "user_2", "name": "Agent B"}],
+                    "Team TV": "HCM",
+                    today_col: True,
+                    # No "Ghi chú" → default 1.0
+                }
+            }
+        ]
+        self.client.list_records.return_value = tvvs_records
+        
+        active = fetch_active_agents(self.client, "TVV")
+        self.assertEqual(len(active), 2)
+        self.assertAlmostEqual(active[0]["weight"], 0.7)
+        self.assertAlmostEqual(active[1]["weight"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

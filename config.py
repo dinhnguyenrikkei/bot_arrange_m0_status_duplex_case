@@ -174,7 +174,7 @@ def discover_table_id(app_id: str, app_secret: str, base_token: str, table_type:
         # Get tenant access token
         url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
         payload = {"app_id": app_id, "app_secret": app_secret}
-        res = requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=30)
         res_data = res.json()
         if res_data.get("code") != 0:
             return None
@@ -185,7 +185,7 @@ def discover_table_id(app_id: str, app_secret: str, base_token: str, table_type:
         # Get list of tables
         tables_url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables"
         headers = {"Authorization": f"Bearer {token}"}
-        r = requests.get(tables_url, headers=headers, timeout=10)
+        r = requests.get(tables_url, headers=headers, timeout=30)
         data = r.json()
         if data.get("code") == 0:
             tables = data.get("data", {}).get("items", [])
@@ -227,7 +227,7 @@ def get_bitable_token_from_sheets_api(app_id: str, app_secret: str, spreadsheet_
         # Get tenant access token
         url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
         payload = {"app_id": app_id, "app_secret": app_secret}
-        res = requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=30)
         res_data = res.json()
         if res_data.get("code") != 0:
             return None
@@ -238,7 +238,7 @@ def get_bitable_token_from_sheets_api(app_id: str, app_secret: str, spreadsheet_
         # Get spreadsheet metainfo
         meta_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
         headers = {"Authorization": f"Bearer {token}"}
-        meta_res = requests.get(meta_url, headers=headers, timeout=10)
+        meta_res = requests.get(meta_url, headers=headers, timeout=30)
         data = meta_res.json()
         
         if data.get("code") == 0:

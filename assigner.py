@@ -49,6 +49,61 @@ def normalize_region(region_value: str) -> str:
         return "Miền Trung"
     return region_value
 
+def is_eligible_for_distribution(fields: Dict[str, Any]) -> bool:
+    """
+    Check if the lead is eligible for distribution based on source and channel requirements:
+    - Nguồn Data must be "Online - Digital MKT"
+    - Kênh đăng ký must be "Tiktok"
+    """
+    def extract_text(val):
+        if not val:
+            return ""
+        if isinstance(val, str):
+            return val.strip()
+        if isinstance(val, list):
+            if len(val) > 0 and isinstance(val[0], dict) and "text" in val[0]:
+                return "".join([v.get("text", "") for v in val]).strip()
+            return ", ".join([str(v) for v in val]).strip()
+        if isinstance(val, dict):
+            return val.get("text", "").strip()
+        return str(val).strip()
+
+    source = extract_text(fields.get("Nguồn Data"))
+    channel = extract_text(fields.get("Kênh đăng ký"))
+    
+    return source == "Online - Digital MKT" and channel == "Tiktok"
+
+def parse_weight_from_note(note_value: Any) -> float:
+    """
+    Parse a weight/percentage from the 'Ghi chú' (Notes) column.
+    Examples:
+        "70%"  -> 0.7
+        "50%"  -> 0.5
+        "100%" -> 1.0
+        ""     -> 1.0 (default)
+        None   -> 1.0 (default)
+    Returns a float between 0.01 and 1.0.
+    """
+    if not note_value:
+        return 1.0
+    text = str(note_value).strip()
+    # Try to extract a number before '%'
+    import re
+    match = re.search(r'(\d+(?:\.\d+)?)\s*%', text)
+    if match:
+        pct = float(match.group(1))
+        weight = pct / 100.0
+        # Clamp between 0.01 and 1.0
+        return max(0.01, min(1.0, weight))
+    # Try plain number (e.g. "0.7" or "70")
+    try:
+        val = float(text)
+        if val > 1.0:
+            val = val / 100.0
+        return max(0.01, min(1.0, val))
+    except (ValueError, TypeError):
+        return 1.0
+
 def detect_tvv_columns(records: List[Dict[str, Any]], date_candidates: List[str]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Dynamically detect the column/field names for:
@@ -163,6 +218,8 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
             f"{year}-{month:02d}-{day:02d}",  # "2026-05-21"
             f"{day:02d}.{month:02d}",  # "21.05"
             f"{day}.{month}",          # "21.5"
+            str(day),                  # "8"
+            f"{day:02d}",              # "08"
         ]
         
         # Dynamically detect columns
@@ -197,7 +254,21 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
                 tvv_link_col = k
                 break
         
-        logger.info(f"Final columns selected: active={active_col}, personnel={personnel_col}, region={region_col}, role={role_col}, recipient={recipient_col}, tvv_link={tvv_link_col}")
+        # Detect "Ghi chú" (Notes) column for weight/percentage
+        note_col = None
+        for k in all_keys:
+            k_low = k.lower().strip()
+            if k_low in ["ghi chú", "ghi chu", "note", "notes"]:
+                note_col = k
+                break
+        if not note_col:
+            for k in all_keys:
+                k_low = k.lower().strip()
+                if any(kw in k_low for kw in ["ghi chú", "ghi chu", "note", "tỷ lệ", "ty le", "%"]):
+                    note_col = k
+                    break
+        
+        logger.info(f"Final columns selected: active={active_col}, personnel={personnel_col}, region={region_col}, role={role_col}, recipient={recipient_col}, tvv_link={tvv_link_col}, note={note_col}")
         
         for rec in records:
             fields = rec.get("fields", {})
@@ -237,6 +308,11 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
             if not person_info:
                 logger.warning(f"TVV record {rec.get('record_id')} has no valid personnel account configured in column '{personnel_col}' (value: '{person_val}').")
                 continue
+            
+            user_id_check, name_check = person_info
+            if not user_id_check:
+                logger.warning(f"TVV record {rec.get('record_id')} has personnel field but user_id is None. Column '{personnel_col}' may be DuplexLink instead of Person. Skipping.")
+                continue
                 
             user_id, name = person_info
             raw_region = fields.get(region_col, "")
@@ -265,6 +341,12 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
                     if rids:
                         tvv_link_record_id = rids[0]
             
+            # Extract weight from "Ghi chú" column
+            weight = 1.0
+            if note_col:
+                note_val = fields.get(note_col)
+                weight = parse_weight_from_note(note_val)
+            
             active_agents.append({
                 "record_id": rec.get("record_id"),
                 "user_id": user_id,
@@ -272,6 +354,7 @@ def fetch_active_agents(client: LarkClient, role: str) -> List[Dict[str, Any]]:
                 "region": region,
                 "recipient_user_id": recipient_user_id or user_id,
                 "tvv_link_record_id": tvv_link_record_id,
+                "weight": weight,
             })
             
         logger.info(f"Found {len(active_agents)} active agents for role '{role}' today.")
@@ -390,7 +473,8 @@ def select_best_tvv_for_lead(
         tvv["count_today"] = len(tvv_assignments)
         
         # Last assignment time today
-        tvv["last_assigned_time"] = max([a["assigned_time"] for a in tvv_assignments]) if tvv_assignments else 0
+        valid_times = [a["assigned_time"] for a in tvv_assignments if a.get("assigned_time") is not None]
+        tvv["last_assigned_time"] = max(valid_times) if valid_times else 0
         
         # Availability based on schedule
         tvv["is_free"] = check_tvv_availability(match_id, target_callback_time, today_assignments)
@@ -405,8 +489,9 @@ def select_best_tvv_for_lead(
     tier1_candidates = [t for t in primary_tvvs if t["is_free"]]
     
     if tier1_candidates:
-        # Sort for Round-Robin: fewer assignments first, then oldest assignment time first
-        tier1_candidates.sort(key=lambda x: (x["count_today"], x["last_assigned_time"]))
+        # Sort for Weighted Round-Robin: lower load ratio first, then oldest assignment time
+        # load = count_today / weight → people with lower weight "fill up" faster
+        tier1_candidates.sort(key=lambda x: (x["count_today"] / x.get("weight", 1.0), x["last_assigned_time"]))
         selected_tvv = tier1_candidates[0]
         logger.info(f"Selected TVV {selected_tvv['name']} from same region ({lead_region}) who is free.")
     else:
@@ -415,18 +500,18 @@ def select_best_tvv_for_lead(
         tier2_candidates = [t for t in other_tvvs if t["is_free"]]
         
         if tier2_candidates:
-            tier2_candidates.sort(key=lambda x: (x["count_today"], x["last_assigned_time"]))
+            tier2_candidates.sort(key=lambda x: (x["count_today"] / x.get("weight", 1.0), x["last_assigned_time"]))
             selected_tvv = tier2_candidates[0]
             logger.info(f"Selected TVV {selected_tvv['name']} from other region who is free.")
         else:
             # Tier 3 (Fallback): Everyone is busy. Pick from same region if possible, otherwise any active TVV
             logger.warning("Everyone is busy! Picking any active TVV to avoid leaving lead unassigned.")
             if primary_tvvs:
-                primary_tvvs.sort(key=lambda x: (x["count_today"], x["last_assigned_time"]))
+                primary_tvvs.sort(key=lambda x: (x["count_today"] / x.get("weight", 1.0), x["last_assigned_time"]))
                 selected_tvv = primary_tvvs[0]
                 logger.info(f"Selected TVV {selected_tvv['name']} from same region as fallback (busy).")
             else:
-                other_tvvs.sort(key=lambda x: (x["count_today"], x["last_assigned_time"]))
+                other_tvvs.sort(key=lambda x: (x["count_today"] / x.get("weight", 1.0), x["last_assigned_time"]))
                 selected_tvv = other_tvvs[0]
                 logger.info(f"Selected TVV {selected_tvv['name']} from other region as fallback (busy).")
                 
@@ -709,6 +794,12 @@ def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[D
         return None
         
     fields = lead.get("fields", {})
+    
+    # Check source and channel eligibility (only distribute Online - Digital MKT & Tiktok)
+    if not is_eligible_for_distribution(fields):
+        logger.info(f"Lead {lead_record_id} does not match Nguồn Data='Online - Digital MKT' and Kênh đăng ký='Tiktok'. Skipping.")
+        return None
+        
     status = fields.get(config.FIELD_TIKTOK_STATUS)
     
     # Check if status matches config value
@@ -844,8 +935,29 @@ def assign_m0_lead_to_tvv(client: LarkClient, lead_record_id: str) -> Optional[D
     
     # Write update to Lark
     if update_fields:
-        client.update_record(config.TABLE_TIKTOK_ID, lead_record_id, update_fields)
-        logger.info(f"Successfully processed lead {lead_record_id}: {result_info}")
+        try:
+            client.update_record(config.TABLE_TIKTOK_ID, lead_record_id, update_fields)
+            logger.info(f"Successfully processed lead {lead_record_id}: {result_info}")
+        except Exception as e:
+            is_perm_err = False
+            err_str = str(e)
+            if "403" in err_str or "Permission denied" in err_str or "1254302" in err_str:
+                is_perm_err = True
+                
+            if is_perm_err and config.FIELD_TIKTOK_ASSIGNED_USER in update_fields:
+                logger.warning(
+                    f"Update failed due to 403/Permission error. "
+                    f"Attempting fallback update by excluding the '{config.FIELD_TIKTOK_ASSIGNED_USER}' field..."
+                )
+                fallback_fields = update_fields.copy()
+                del fallback_fields[config.FIELD_TIKTOK_ASSIGNED_USER]
+                if fallback_fields:
+                    client.update_record(config.TABLE_TIKTOK_ID, lead_record_id, fallback_fields)
+                    logger.info(f"Successfully processed lead {lead_record_id} using fallback (no 'Tư vấn viên' link).")
+                else:
+                    logger.info("Fallback update fields would be empty. Skipping update.")
+            else:
+                raise e
         return result_info
         
     return None
@@ -866,14 +978,19 @@ def _is_field_empty(field_value: Any) -> bool:
         if all(isinstance(item, dict) for item in field_value):
             all_empty = True
             for item in field_value:
+                if "id" in item:
+                    all_empty = False
+                    break
                 rids = item.get("record_ids", item.get("link_record_ids"))
                 if rids is not None:
                     if len(rids) > 0:
                         all_empty = False
                         break
                 else:
-                    # Dict without record_ids/link_record_ids → not a link structure,
-                    # treat as non-empty (e.g. Person field [{"id": "ou_xxx"}])
+                    if "table_id" in item:
+                        # Empty link structure containing table_id but no record_ids
+                        continue
+                    # Dict without record_ids/link_record_ids or table_id -> treat as non-empty
                     all_empty = False
                     break
             if all_empty:
@@ -1011,6 +1128,12 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
     
     for lead in lead_records:
         fields = lead.get("fields", {})
+        
+        # Check source and channel eligibility (only distribute Online - Digital MKT & Tiktok)
+        if not is_eligible_for_distribution(fields):
+            logger.info(f"Batch: Lead {lead.get('record_id')} does not match Nguồn Data='Online - Digital MKT' and Kênh đăng ký='Tiktok'. Skipping.")
+            continue
+            
         tvv_field_value = fields.get(config.FIELD_TIKTOK_ASSIGNED_USER)
         recipient_field_value = fields.get(config.FIELD_TIKTOK_RECIPIENT_USER)
         
@@ -1059,6 +1182,9 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
                 
                 if selected:
                     recipient_uid = selected.get("recipient_user_id") or selected["user_id"]
+                    if not recipient_uid:
+                        logger.warning(f"Mirror mode: Lead {lead_record_id} → selected TVV has no valid user_id. Skipping.")
+                        continue
                     update_fields = {
                         config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_uid}],
                         config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
@@ -1179,6 +1305,9 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
                 
                 if selected_tvv:
                     recipient_uid = selected_tvv.get("recipient_user_id") or selected_tvv["user_id"]
+                    if not recipient_uid:
+                        logger.warning(f"Round-robin: Lead {lead_record_id} → selected TVV has no valid user_id. Skipping.")
+                        continue
                     update_fields = {
                         config.FIELD_TIKTOK_RECIPIENT_USER: [{"id": recipient_uid}],
                         config.FIELD_TIKTOK_ASSIGNED_TIME: current_time_ms,
@@ -1230,8 +1359,39 @@ def assign_m0_leads_batch(client: LarkClient, lead_records: List[Dict[str, Any]]
     # ── Batch write to Lark ──
     if records_to_update:
         logger.info(f"Performing batch update in Lark for {len(records_to_update)} records...")
-        client.batch_update_records(config.TABLE_TIKTOK_ID, records_to_update)
-        logger.info("Successfully updated batch records.")
+        try:
+            client.batch_update_records(config.TABLE_TIKTOK_ID, records_to_update)
+            logger.info("Successfully updated batch records.")
+        except Exception as e:
+            is_perm_err = False
+            err_str = str(e)
+            if "403" in err_str or "Permission denied" in err_str or "1254302" in err_str:
+                is_perm_err = True
+                
+            if is_perm_err:
+                logger.warning(
+                    f"Batch update failed due to 403/Permission error. This usually happens when the "
+                    f"Duplex Link column '{config.FIELD_TIKTOK_ASSIGNED_USER}' connects to a table in another "
+                    f"base where the Lark App has not been granted Editor permissions. "
+                    f"Attempting fallback update by excluding the '{config.FIELD_TIKTOK_ASSIGNED_USER}' field..."
+                )
+                fallback_records = []
+                for rec in records_to_update:
+                    f_fields = rec.get("fields", {}).copy()
+                    if config.FIELD_TIKTOK_ASSIGNED_USER in f_fields:
+                        del f_fields[config.FIELD_TIKTOK_ASSIGNED_USER]
+                    fallback_records.append({
+                        "record_id": rec["record_id"],
+                        "fields": f_fields
+                    })
+                try:
+                    client.batch_update_records(config.TABLE_TIKTOK_ID, fallback_records)
+                    logger.info("Successfully completed fallback update (assigned 'Người nhận data' only).")
+                except Exception as fallback_err:
+                    logger.error(f"Fallback update also failed: {fallback_err}")
+                    raise fallback_err
+            else:
+                raise e
         
     return assigned_results
 

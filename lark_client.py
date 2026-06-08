@@ -45,7 +45,7 @@ class LarkClient:
         
         try:
             logger.info("Requesting new tenant_access_token...")
-            response = requests.post(url, json=payload, timeout=10)
+            response = requests.post(url, json=payload, timeout=30)
             response.raise_for_status()
             data = response.json()
             
@@ -96,12 +96,18 @@ class LarkClient:
 
             headers = self.get_headers()
             
+            if not params:
+                params = {}
+            params["user_id_type"] = "open_id"
+            
             try:
                 # Lark's List Records is GET
                 # If we have a filter, we can pass it as a JSON payload or in the query.
                 # Actually, standard GET request doesn't take a JSON body, but Lark's API accepts filter parameter.
                 # If we need complex filtering, we will do it in-memory to prevent complex URL encoding and API mismatches.
-                response = requests.get(url, headers=headers, params=params, timeout=15)
+                response = requests.get(url, headers=headers, params=params, timeout=30)
+                if response.status_code != 200:
+                    logger.error(f"HTTP Status {response.status_code} listing records from Lark: {response.text}")
                 response.raise_for_status()
                 data = response.json()
                 
@@ -115,6 +121,8 @@ class LarkClient:
                 else:
                     raise ValueError(f"Error listing records: {data.get('msg')} (code: {data.get('code')})")
             except Exception as e:
+                if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+                    logger.error(f"Detailed HTTP Error response listing records: {e.response.text}")
                 logger.error(f"Failed to list records for table {table_id}: {e}")
                 raise
                 
@@ -125,11 +133,11 @@ class LarkClient:
         Fetch a single record by its ID.
         """
         base_token = self._get_base_token(table_id)
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}"
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/{record_id}?user_id_type=open_id"
         headers = self.get_headers()
         try:
             logger.info(f"Fetching record {record_id} from table {table_id}...")
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
             if data.get("code") == 0:
@@ -151,7 +159,7 @@ class LarkClient:
         
         try:
             logger.info(f"Updating record {record_id} in table {table_id}...")
-            response = requests.put(url, headers=headers, json=payload, timeout=10)
+            response = requests.put(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
             data = response.json()
             
@@ -175,7 +183,7 @@ class LarkClient:
             return {}
             
         base_token = self._get_base_token(table_id)
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_update"
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_update?user_id_type=open_id"
         headers = self.get_headers()
         
         # Split into chunks of 500 records
@@ -186,13 +194,17 @@ class LarkClient:
             
             try:
                 logger.info(f"Batch updating {len(chunk)} records in table {table_id}...")
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                if response.status_code != 200:
+                    logger.error(f"HTTP Status {response.status_code} from Lark: {response.text}")
                 response.raise_for_status()
                 data = response.json()
                 
                 if data.get("code") != 0:
                     raise ValueError(f"Failed to batch update records: {data.get('msg')} (code: {data.get('code')})")
             except Exception as e:
+                if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+                    logger.error(f"Detailed HTTP Error response: {e.response.text}")
                 logger.error(f"Error batch updating records: {e}")
                 raise
                 
@@ -211,7 +223,7 @@ class LarkClient:
             return []
             
         base_token = self._get_base_token(table_id)
-        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_create"
+        url = f"https://open.larksuite.com/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/batch_create?user_id_type=open_id"
         headers = self.get_headers()
         created_ids = []
         
@@ -223,7 +235,7 @@ class LarkClient:
             
             try:
                 logger.info(f"Batch creating {len(chunk)} records in table {table_id}...")
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 
@@ -263,7 +275,7 @@ class LarkClient:
             
             try:
                 logger.info(f"Batch deleting {len(chunk)} records in table {table_id}...")
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 
@@ -301,7 +313,7 @@ class LarkClient:
                 params["page_token"] = page_token
 
             try:
-                response = requests.get(url, headers=headers, params=params, timeout=10)
+                response = requests.get(url, headers=headers, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
 
@@ -360,7 +372,7 @@ class LarkClient:
                 
             headers = self.get_headers()
             try:
-                response = requests.get(url, headers=headers, params=params, timeout=15)
+                response = requests.get(url, headers=headers, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 
